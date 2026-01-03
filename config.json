@@ -1,0 +1,31 @@
+{
+  "discord_token": "YOUR_DISCORD_BOT_TOKEN",
+  "discord_channel_id": 1234567890123456789,
+  "log_channel_id": 1234567890123456789,
+  
+  "twitter": {
+    "api_key": "YOUR_TWITTER_API_KEY",
+    "api_secret": "YOUR_TWITTER_API_SECRET",
+    "bearer_token": "YOUR_TWITTER_BEARER_TOKEN",
+    "access_token": "YOUR_TWITTER_ACCESS_TOKEN",
+    "access_token_secret": "YOUR_TWITTER_ACCESS_TOKEN_SECRET"
+  },
+  
+  "rate_limits": {
+    "hourly": 50,
+    "daily": 100
+  },
+  
+  "filters": {
+    "enabled": true,
+    "min_length": 10,
+    "max_length": 280,
+    "required_keywords": [],
+    "excluded_keywords": ["draft", "wip", "test"],
+    "required_roles": [],
+    "allowed_users": [],
+    "require_attachments": false,
+    "exclude_bots": true,
+    "custom_regex": null
+  }
+}
