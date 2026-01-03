@@ -3,6 +3,7 @@ from discord.ext import commands
 import tweepy
 import json
 import re
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import asyncio
@@ -137,9 +138,24 @@ class DiscordTwitterBot(commands.Bot):
         
         super().__init__(command_prefix='!tw_', intents=intents)
         
-        # Load configuration
+        # Load configuration from file (for filters and rate limits)
         with open(config_path, 'r') as f:
-            self.config = json.load(f)
+            file_config = json.load(f)
+        
+        # Override credentials with environment variables
+        self.config = {
+            'discord_channel_id': int(os.getenv('DISCORD_CHANNEL_ID', file_config.get('discord_channel_id', 0))),
+            'log_channel_id': int(os.getenv('LOG_CHANNEL_ID', file_config.get('log_channel_id', 0))) if os.getenv('LOG_CHANNEL_ID') or file_config.get('log_channel_id') else None,
+            'twitter': {
+                'api_key': os.getenv('TWITTER_API_KEY'),
+                'api_secret': os.getenv('TWITTER_API_SECRET'),
+                'bearer_token': os.getenv('TWITTER_BEARER_TOKEN'),
+                'access_token': os.getenv('TWITTER_ACCESS_TOKEN'),
+                'access_token_secret': os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
+            },
+            'rate_limits': file_config.get('rate_limits', {'hourly': 50, 'daily': 100}),
+            'filters': file_config.get('filters', {})
+        }
         
         # Initialize Twitter client
         self.twitter_client = self._init_twitter()
@@ -156,6 +172,9 @@ class DiscordTwitterBot(commands.Bot):
         
         # Logging
         self.log_channel_id = self.config.get('log_channel_id')
+        
+        # Store config path for reload command
+        self.config_path = config_path
     
     def _init_twitter(self) -> tweepy.Client:
         """Initialize Twitter API client"""
@@ -269,6 +288,12 @@ class DiscordTwitterBot(commands.Bot):
             value=f"Enabled: {self.message_filter.enabled}",
             inline=False
         )
+        embed.add_field(
+            name="Configuration",
+            value=f"Channel: {self.monitored_channel_id}\n"
+                  f"Log Channel: {self.log_channel_id or 'Not set'}",
+            inline=False
+        )
         
         await ctx.send(embed=embed)
     
@@ -296,11 +321,21 @@ class DiscordTwitterBot(commands.Bot):
     async def reload_config(self, ctx):
         """Reload configuration from file (Admin only)"""
         try:
-            with open('config.json', 'r') as f:
-                self.config = json.load(f)
+            with open(self.config_path, 'r') as f:
+                file_config = json.load(f)
+            
+            # Update config (keeping environment variable credentials)
+            self.config['rate_limits'] = file_config.get('rate_limits', {'hourly': 50, 'daily': 100})
+            self.config['filters'] = file_config.get('filters', {})
             
             # Reinitialize filter with new config
             self.message_filter = MessageFilter(self.config.get('filters', {}))
+            
+            # Reinitialize rate limiter with new limits
+            self.rate_limiter = TwitterRateLimiter(
+                max_posts_per_hour=self.config.get('rate_limits', {}).get('hourly', 50),
+                max_posts_per_day=self.config.get('rate_limits', {}).get('daily', 100)
+            )
             
             await ctx.send("✅ Configuration reloaded successfully!")
         except Exception as e:
@@ -309,13 +344,33 @@ class DiscordTwitterBot(commands.Bot):
 
 def main():
     """Main entry point"""
+    # Check for required environment variables
+    required_env_vars = [
+        'DISCORD_TOKEN',
+        'DISCORD_CHANNEL_ID',
+        'TWITTER_API_KEY',
+        'TWITTER_API_SECRET',
+        'TWITTER_BEARER_TOKEN',
+        'TWITTER_ACCESS_TOKEN',
+        'TWITTER_ACCESS_TOKEN_SECRET'
+    ]
+    
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        print("ERROR: Missing required environment variables:")
+        for var in missing_vars:
+            print(f"  - {var}")
+        print("\nPlease set these environment variables before running the bot.")
+        return
+    
+    # Initialize and run bot
     bot = DiscordTwitterBot('config.json')
     
-    # Get Discord token from config
-    with open('config.json', 'r') as f:
-        config = json.load(f)
+    # Get Discord token from environment
+    discord_token = os.getenv('DISCORD_TOKEN')
     
-    bot.run(config['discord_token'])
+    bot.run(discord_token)
 
 
 if __name__ == '__main__':
