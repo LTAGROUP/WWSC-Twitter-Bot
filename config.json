@@ -14,6 +14,14 @@
     "allowed_users": [],
     "require_attachments": false,
     "exclude_bots": false,
+    "require_embeds": false,
     "custom_regex": null
+  },
+  
+  "embed_settings": {
+    "include_hashtags": false,
+    "default_hashtags": ["restock", "instock"],
+    "shorten_links": false,
+    "tweet_templates": []
   }
 }
