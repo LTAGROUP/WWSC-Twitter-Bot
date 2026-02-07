@@ -1,15 +1,51 @@
 # Discord to Twitter Auto-Poster
 
-A Discord bot that automatically posts messages from a specific Discord channel to Twitter, with advanced filtering and rate limiting to manage Twitter API usage.
+A Discord bot that automatically posts messages from a specific Discord channel to Twitter, with **embed support** for restock alerts, advanced filtering, and rate limiting to manage Twitter API usage.
 
 ## Features
 
 - ✅ **Automatic posting** from Discord to Twitter
+- 🎨 **Discord embed support** - Converts embeds to natural-sounding tweets
+- 🛍️ **Restock alert formatting** - Automatically formats product info (name, price, stock, limit, etc.)
 - 🎯 **Advanced filtering system** with multiple criteria
 - ⏱️ **Rate limiting** to stay within Twitter API limits
 - 📊 **Status monitoring** commands
 - 🔧 **Hot-reload** configuration without restarting
 - 📝 **Logging** to dedicated Discord channel
+
+## What's New: Embed Support
+
+The bot now automatically detects Discord embeds (like restock alerts) and converts them into natural-sounding tweets! It extracts:
+
+- **Product Name** (from embed title or fields)
+- **Link** (from embed URL or fields)
+- **Price** (automatically formatted with $ symbol)
+- **Stock** (smart formatting: "Only 5 left!", "Limited Stock!", etc.)
+- **Order Limit** (formatted as "Limit X per order")
+- **Color/Variant** (appended to product name)
+- **Size** (appended to product name)
+- **Retailer** (added to link when space permits)
+- **SKU** (for reference)
+
+### Example Tweet Outputs
+
+Input embed with fields:
+```
+Product: Nike Air Jordan 1 Retro High
+Color: University Blue
+Price: $170
+Stock: 23
+Limit: 2
+Link: https://example.com/product
+```
+
+Output tweet (rotates between 5 templates for variety):
+```
+🚨 Nike Air Jordan 1 Retro High just restocked! • University Blue
+💰 $170 • 23 available
+📦 Limit 2 per order
+🔗 https://example.com/product
+```
 
 ## Setup
 
@@ -46,22 +82,10 @@ pip install -r requirements.txt
 
 ### 4. Configure the Bot
 
-Edit `config.json` with your credentials:
+Edit `config.json` with your settings:
 
 ```json
 {
-  "discord_token": "YOUR_DISCORD_BOT_TOKEN",
-  "discord_channel_id": 1234567890123456789,
-  "log_channel_id": 1234567890123456789,
-  
-  "twitter": {
-    "api_key": "YOUR_TWITTER_API_KEY",
-    "api_secret": "YOUR_TWITTER_API_SECRET",
-    "bearer_token": "YOUR_TWITTER_BEARER_TOKEN",
-    "access_token": "YOUR_TWITTER_ACCESS_TOKEN",
-    "access_token_secret": "YOUR_TWITTER_ACCESS_TOKEN_SECRET"
-  },
-  
   "rate_limits": {
     "hourly": 50,
     "daily": 100
@@ -77,9 +101,29 @@ Edit `config.json` with your credentials:
     "allowed_users": [],
     "require_attachments": false,
     "exclude_bots": true,
+    "require_embeds": false,
     "custom_regex": null
+  },
+  
+  "embed_settings": {
+    "include_hashtags": false,
+    "default_hashtags": ["restock", "instock"],
+    "shorten_links": false,
+    "tweet_templates": []
   }
 }
+```
+
+**Set environment variables for credentials:**
+```bash
+export DISCORD_TOKEN="your_discord_bot_token"
+export DISCORD_CHANNEL_ID="1234567890123456789"
+export LOG_CHANNEL_ID="1234567890123456789"  # Optional
+export TWITTER_API_KEY="your_twitter_api_key"
+export TWITTER_API_SECRET="your_twitter_api_secret"
+export TWITTER_BEARER_TOKEN="your_twitter_bearer_token"
+export TWITTER_ACCESS_TOKEN="your_twitter_access_token"
+export TWITTER_ACCESS_TOKEN_SECRET="your_twitter_access_token_secret"
 ```
 
 **To get Discord channel IDs:**
@@ -89,7 +133,7 @@ Edit `config.json` with your credentials:
 ### 5. Run the Bot
 
 ```bash
-python discord_twitter_bot.py
+python discord_twitter_bot_with_embeds.py
 ```
 
 ## Configuration Options
@@ -109,51 +153,67 @@ Configure what messages get posted to Twitter:
 - Enable or disable all filtering
 - Default: `true`
 
-#### `min_length` (integer)
-- Minimum message length in characters
-- Default: `10`
-- Example: `"min_length": 20` - Only post messages with 20+ characters
+#### `require_embeds` (boolean)
+- Only post messages that contain embeds
+- Perfect for restock alert channels
+- Default: `false`
 
-#### `max_length` (integer)
-- Maximum message length in characters
-- Default: `280` (Twitter's limit)
-- Messages longer than this will be truncated
+#### `exclude_bots` (boolean)
+- Prevent bot messages from being posted
+- Set to `false` if your restock alerts come from a bot
+- Default: `true`
+
+#### `min_length` / `max_length` (integer)
+- For text-only messages (embeds bypass this)
+- Default: `10` / `280`
 
 #### `required_keywords` (array of strings)
 - Messages must contain at least one of these keywords
+- Checked in embed title, description, and fields
 - Case-insensitive
 - Default: `[]` (no requirement)
-- Example: `"required_keywords": ["announcement", "news", "update"]`
 
 #### `excluded_keywords` (array of strings)
 - Messages containing any of these keywords will be blocked
 - Case-insensitive
 - Default: `["draft", "wip", "test"]`
-- Example: `"excluded_keywords": ["draft", "private", "internal"]`
 
 #### `required_roles` (array of strings)
 - Only post messages from users with these Discord roles
 - Default: `[]` (all roles allowed)
-- Example: `"required_roles": ["Moderator", "Admin", "Content Creator"]`
 
 #### `allowed_users` (array of strings)
 - Only post messages from specific Discord user IDs
 - Default: `[]` (all users allowed)
-- Example: `"allowed_users": ["123456789012345678", "987654321098765432"]`
-
-#### `require_attachments` (boolean)
-- Only post messages that have attachments (images, files, etc.)
-- Default: `false`
-
-#### `exclude_bots` (boolean)
-- Prevent bot messages from being posted
-- Default: `true`
 
 #### `custom_regex` (string or null)
 - Custom regex pattern for advanced filtering
-- Only messages matching this pattern will be posted
 - Default: `null`
-- Example: `"custom_regex": "^\\[TWEET\\].*"` - Only post messages starting with [TWEET]
+
+### Embed Settings
+
+Customize how embeds are converted to tweets:
+
+#### `include_hashtags` (boolean)
+- Add hashtags to the end of tweets
+- Only added if there's room (under 280 chars)
+- Default: `false`
+
+#### `default_hashtags` (array of strings)
+- Hashtags to include when `include_hashtags` is true
+- Default: `["restock", "instock"]`
+
+#### `tweet_templates` (array of strings)
+- Custom tweet templates (leave empty to use built-in templates)
+- Available variables: `{product_name}`, `{color_info}`, `{size_info}`, `{price}`, `{stock_info}`, `{limit_info}`, `{link}`
+- Default: `[]` (uses 5 built-in templates that rotate)
+
+**Example custom template:**
+```json
+"tweet_templates": [
+  "🔔 {product_name} ALERT{color_info}\n\n💵 {price}{stock_info}{limit_info}\n\n👉 {link}"
+]
+```
 
 ## Bot Commands
 
@@ -175,6 +235,14 @@ Test if a message would pass the current filters without actually posting
 !tw_test_filter This is a test announcement
 ```
 
+### `!tw_test_embed`
+Test embed parsing on the most recent embed in the channel - shows you what the tweet would look like
+
+**Example:**
+```
+!tw_test_embed
+```
+
 ### `!tw_reload_config`
 Reload configuration from `config.json` without restarting the bot (Admin only)
 
@@ -183,78 +251,88 @@ Reload configuration from `config.json` without restarting the bot (Admin only)
 !tw_reload_config
 ```
 
-## Filter Examples
+## How Embed Parsing Works
 
-### Example 1: Announcements Only
-Only post messages that contain announcement keywords:
+The bot intelligently extracts data from Discord embeds:
+
+1. **Field Matching** - Recognizes common field names:
+   - Product Name: "product", "name", "title", "item"
+   - Link: "link", "url", "buy link"
+   - SKU: "sku", "product id"
+   - Price: "price", "cost", "msrp"
+   - Stock: "stock", "quantity", "available"
+   - Limit: "limit", "order limit", "max quantity"
+   - Color: "color", "colorway", "variant"
+   - Size: "size", "sizes"
+   - Retailer: "retailer", "store"
+
+2. **Smart Formatting**:
+   - Prices get $ symbol if missing
+   - Stock under 10: "Only X left!"
+   - Stock 10-50: "X available"
+   - Stock over 50: not mentioned
+   - Limits formatted as "Limit X per order"
+
+3. **Template Rotation**:
+   - 5 different tweet styles to keep feed feeling natural
+   - Templates automatically rotate with each post
+
+4. **URL Extraction**:
+   - Checks embed URL field
+   - Falls back to links in description
+   - Ensures every tweet has a way to purchase
+
+## Configuration Examples
+
+### Example 1: Restock Channel (Embeds Only)
+Only post embeds from your restock bot:
 
 ```json
 "filters": {
   "enabled": true,
+  "require_embeds": true,
+  "exclude_bots": false,
+  "excluded_keywords": []
+}
+```
+
+### Example 2: Manual Announcements (Text Messages)
+Only post text messages from moderators:
+
+```json
+"filters": {
+  "enabled": true,
+  "require_embeds": false,
+  "required_roles": ["Moderator", "Admin"],
   "min_length": 20,
-  "required_keywords": ["announcement", "news", "update", "release"],
-  "excluded_keywords": ["draft", "test"],
-  "exclude_bots": true
+  "excluded_keywords": ["draft", "test"]
 }
 ```
 
-### Example 2: Specific Users Only
-Only post messages from designated content creators:
+### Example 3: Mixed Content with Keywords
+Post both embeds and text, but only if they contain certain keywords:
 
 ```json
 "filters": {
   "enabled": true,
-  "allowed_users": ["123456789012345678", "987654321098765432"],
-  "min_length": 10,
-  "exclude_bots": true
+  "require_embeds": false,
+  "required_keywords": ["restock", "drop", "available now"],
+  "exclude_bots": false
 }
 ```
 
-### Example 3: Role-Based with Keyword Filter
-Only post from users with specific roles and certain keywords:
+### Example 4: Custom Tweet Template
+Use your own tweet format:
 
 ```json
-"filters": {
-  "enabled": true,
-  "required_roles": ["Social Media Manager", "Marketing"],
-  "required_keywords": ["tweet", "share", "announce"],
-  "excluded_keywords": ["draft", "wip", "private", "internal"],
-  "min_length": 15,
-  "max_length": 280
+"embed_settings": {
+  "include_hashtags": true,
+  "default_hashtags": ["sneakers", "restock", "kicks"],
+  "tweet_templates": [
+    "⚡️ LIVE NOW ⚡️\n\n{product_name}{color_info}\n{price}{stock_info}{limit_info}\n\nCop here: {link}"
+  ]
 }
 ```
-
-### Example 4: Tag-Based System
-Use custom regex to require a specific tag at the start of messages:
-
-```json
-"filters": {
-  "enabled": true,
-  "custom_regex": "^\\[TWEET\\]",
-  "exclude_bots": true
-}
-```
-
-Users would post: `[TWEET] This message will be posted to Twitter`
-
-### Example 5: Conservative Rate Limiting
-Very conservative posting to preserve API limits:
-
-```json
-"rate_limits": {
-  "hourly": 10,
-  "daily": 50
-}
-```
-
-## How It Works
-
-1. **Message Received**: Bot monitors the configured Discord channel
-2. **Filter Check**: Message is checked against all enabled filters
-3. **Rate Limit Check**: Verifies posting won't exceed hourly/daily limits
-4. **Post to Twitter**: If all checks pass, message is posted to Twitter
-5. **Confirmation**: Bot reacts to the Discord message with 🐦 emoji
-6. **Logging**: Activity is logged to the configured log channel
 
 ## Troubleshooting
 
@@ -262,49 +340,68 @@ Very conservative posting to preserve API limits:
 - Check that Message Content Intent is enabled in Discord Developer Portal
 - Verify bot has proper permissions in the channel
 
-### Twitter posting fails
+### Twitter posting fails (401 Unauthorized)
 - Verify all Twitter API credentials are correct
 - Check that your Twitter app has "Read and Write" permissions
 - Ensure you haven't exceeded Twitter's rate limits
+- Look at the detailed error logs for API error codes
 
-### Messages not being posted
-- Use `!tw_test_filter <your message>` to see why a message is being filtered
-- Check the log channel for detailed filtering reasons
-- Verify filters aren't too restrictive
+### Embeds not being posted
+- Check if `require_embeds` is set correctly
+- Use `!tw_test_embed` to see if embed is being parsed
+- Verify the bot is monitoring the correct channel
+- Check logs for filtering reasons
+
+### Tweets look wrong
+- Use `!tw_test_embed` to preview the output
+- Adjust `embed_settings` in config
+- Create custom `tweet_templates` if needed
+- Check if embed fields match expected names
 
 ### Rate limits being hit
 - Reduce `hourly` and `daily` limits in config
-- Add more restrictive filters to reduce qualifying messages
+- Add more restrictive filters
 - Check Twitter Developer Portal for your actual API limits
 
 ## Advanced Usage
 
-### Multiple Filter Layers
-You can combine multiple filter types for precise control:
+### Custom Field Names
+If your embeds use non-standard field names, the bot will try to extract links from descriptions as a fallback. You can also add custom templates that work with your specific embed structure.
+
+### Testing Workflow
+1. Use `!tw_test_embed` to see how an embed will be converted
+2. Adjust `embed_settings` if needed
+3. Use `!tw_reload_config` to apply changes
+4. Test again without restarting the bot
+
+### Multiple Templates for Variety
+The bot rotates through templates to make your Twitter feed feel more natural and less bot-like. You can define multiple custom templates:
 
 ```json
-"filters": {
-  "enabled": true,
-  "required_roles": ["Approved Poster"],
-  "required_keywords": ["#announcement"],
-  "excluded_keywords": ["draft", "preview"],
-  "min_length": 30,
-  "max_length": 250,
-  "exclude_bots": true
-}
+"tweet_templates": [
+  "🚨 {product_name} RESTOCKED!{color_info}\n💰 {price}{limit_info}\n{link}",
+  "⚡ {product_name} back in stock{color_info}\n\nPrice: {price}{stock_info}\n\n{link}",
+  "🔥 Live: {product_name}{color_info}\n{price}{limit_info}\n\nGo go go: {link}"
+]
 ```
 
-This ensures:
-- Only users with "Approved Poster" role
-- Message contains "#announcement"
-- Doesn't contain "draft" or "preview"
-- Is between 30-250 characters
-- Is not from a bot
+## Logging
+
+The bot provides comprehensive logging:
+- **Console**: All events logged to stdout
+- **bot.log file**: Persistent log file for debugging
+- **Discord log channel**: Real-time notifications (if configured)
+
+Log levels:
+- INFO: Normal operations, successful posts
+- WARNING: Rate limits, authentication issues
+- ERROR: Failed posts, API errors
+- DEBUG: Detailed filtering decisions, embed parsing
 
 ## Security Notes
 
 - Never commit your `config.json` with real credentials to version control
-- Consider using environment variables for sensitive data
+- Use environment variables for sensitive data
 - Regularly rotate your API keys
 - Monitor your bot's activity through the log channel
 
