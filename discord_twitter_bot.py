@@ -7,7 +7,7 @@ import os
 import logging
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import asyncio
 from collections import deque
 
@@ -21,6 +21,237 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('DiscordTwitterBot')
+
+
+class EmbedParser:
+    """Parses Discord embeds and converts them to natural-sounding tweets"""
+    
+    # Common field name variations for different data points
+    FIELD_MAPPINGS = {
+        'product_name': ['product', 'product name', 'name', 'title', 'item'],
+        'link': ['link', 'url', 'product link', 'buy link', 'purchase link'],
+        'sku': ['sku', 'product id', 'id', 'item number'],
+        'price': ['price', 'cost', 'msrp', 'retail price'],
+        'stock': ['stock', 'quantity', 'qty', 'available', 'in stock'],
+        'limit': ['limit', 'order limit', 'max quantity', 'max order', 'per order'],
+        'color': ['color', 'colour', 'colorway', 'variant'],
+        'size': ['size', 'sizes', 'available sizes'],
+        'retailer': ['retailer', 'store', 'seller', 'site'],
+        'release_date': ['release date', 'drop date', 'available', 'launches'],
+        'category': ['category', 'type', 'product type'],
+    }
+    
+    # Tweet templates with variations for natural feel
+    TWEET_TEMPLATES = [
+        # Template 1: Casual alert style
+        "🚨 {product_name} just restocked!{color_info}{size_info}\n💰 {price}{stock_info}{limit_info}\n🔗 {link}",
+        
+        # Template 2: Direct and informative
+        "{product_name} is back in stock!{color_info}{size_info}\n\nPrice: {price}{stock_info}{limit_info}\n\n{link}",
+        
+        # Template 3: Excited announcement
+        "⚡ RESTOCK ALERT ⚡\n\n{product_name}{color_info}{size_info}\n{price}{stock_info}{limit_info}\n\n👉 {link}",
+        
+        # Template 4: Clean and simple
+        "✨ {product_name}{color_info}{size_info}\n\n{price}{stock_info}{limit_info}\n\nShop now: {link}",
+        
+        # Template 5: Urgency focused
+        "🔥 {product_name} BACK IN STOCK{color_info}{size_info}\n\n💵 {price}{stock_info}{limit_info}\n\nGrab yours: {link}",
+    ]
+    
+    def __init__(self, config: Dict = None):
+        """Initialize embed parser with optional configuration"""
+        self.config = config or {}
+        self.template_index = 0  # Rotate through templates for variety
+        
+        # Allow custom templates in config
+        self.custom_templates = self.config.get('tweet_templates', [])
+        
+        # Configuration options
+        self.include_hashtags = self.config.get('include_hashtags', False)
+        self.default_hashtags = self.config.get('default_hashtags', ['restock', 'instock'])
+        self.shorten_links = self.config.get('shorten_links', False)  # Could integrate bit.ly later
+        
+        logger.info("Embed parser initialized")
+    
+    def parse_embed(self, embed: discord.Embed) -> Dict[str, str]:
+        """Extract structured data from a Discord embed"""
+        data = {}
+        
+        # Get title as product name if available
+        if embed.title:
+            data['product_name'] = embed.title
+            logger.debug(f"Found product name in title: {embed.title}")
+        
+        # Get URL from embed if available
+        if embed.url:
+            data['link'] = embed.url
+            logger.debug(f"Found link in embed URL: {embed.url}")
+        
+        # Parse fields
+        for field in embed.fields:
+            field_name = field.name.lower().strip()
+            field_value = field.value.strip()
+            
+            # Match field name to our known categories
+            for category, variations in self.FIELD_MAPPINGS.items():
+                if any(var in field_name for var in variations):
+                    data[category] = field_value
+                    logger.debug(f"Matched field '{field.name}' to category '{category}': {field_value}")
+                    break
+        
+        # Parse description for additional info if fields are sparse
+        if embed.description and len(data) < 3:
+            # Try to extract link from description
+            url_match = re.search(r'https?://[^\s\)]+', embed.description)
+            if url_match and 'link' not in data:
+                data['link'] = url_match.group(0)
+                logger.debug(f"Extracted link from description: {data['link']}")
+        
+        # Parse footer for additional metadata
+        if embed.footer and embed.footer.text:
+            footer_text = embed.footer.text.lower()
+            # Check for stock info in footer
+            if 'stock' in footer_text or 'available' in footer_text:
+                data['stock'] = embed.footer.text
+        
+        logger.info(f"Parsed embed data: {list(data.keys())}")
+        return data
+    
+    def format_price(self, price_str: str) -> str:
+        """Clean up price formatting"""
+        # Remove extra whitespace
+        price_str = price_str.strip()
+        
+        # Ensure it starts with currency symbol
+        if not price_str.startswith('$') and not price_str.startswith('€') and not price_str.startswith('£'):
+            # Try to detect if it's just a number
+            if re.match(r'^\d+\.?\d*$', price_str):
+                price_str = f"${price_str}"
+        
+        return price_str
+    
+    def format_stock_info(self, stock_str: str) -> str:
+        """Format stock information naturally"""
+        stock_str = stock_str.lower().strip()
+        
+        # If it's just a number
+        if stock_str.isdigit():
+            qty = int(stock_str)
+            if qty < 10:
+                return f" • Only {qty} left!"
+            elif qty < 50:
+                return f" • {qty} available"
+            else:
+                return ""  # Don't mention if plenty in stock
+        
+        # If it contains "in stock" or similar
+        if 'in stock' in stock_str or 'available' in stock_str:
+            return " • In Stock"
+        
+        # If it says limited
+        if 'limited' in stock_str or 'low' in stock_str:
+            return " • Limited Stock!"
+        
+        return f" • {stock_str.title()}"
+    
+    def format_limit_info(self, limit_str: str) -> str:
+        """Format order limit information"""
+        limit_str = limit_str.strip()
+        
+        # If it's just a number
+        if limit_str.isdigit():
+            return f"\n📦 Limit {limit_str} per order"
+        
+        # If it already says "per order" or similar
+        if 'per' in limit_str.lower():
+            return f"\n📦 {limit_str}"
+        
+        return f"\n📦 Limit: {limit_str}"
+    
+    def create_tweet_from_embed(self, embed: discord.Embed) -> str:
+        """Convert embed to a natural-sounding tweet"""
+        data = self.parse_embed(embed)
+        
+        # Ensure we have minimum required info
+        if 'product_name' not in data:
+            data['product_name'] = embed.title or "Product"
+            logger.warning("No product name found, using default")
+        
+        if 'link' not in data:
+            logger.warning("No link found in embed")
+            data['link'] = "Link in bio"  # Fallback
+        
+        # Format the data components
+        product_name = data['product_name']
+        
+        # Optional components with natural formatting
+        color_info = ""
+        if 'color' in data:
+            color_info = f" • {data['color']}"
+        
+        size_info = ""
+        if 'size' in data:
+            size_info = f" • {data['size']}"
+        
+        price = self.format_price(data.get('price', 'Check site for pricing'))
+        
+        stock_info = ""
+        if 'stock' in data:
+            stock_info = self.format_stock_info(data['stock'])
+        
+        limit_info = ""
+        if 'limit' in data:
+            limit_info = self.format_limit_info(data['limit'])
+        
+        link = data['link']
+        
+        # Select template (use custom if available, otherwise rotate through defaults)
+        if self.custom_templates:
+            template = self.custom_templates[self.template_index % len(self.custom_templates)]
+        else:
+            template = self.TWEET_TEMPLATES[self.template_index % len(self.TWEET_TEMPLATES)]
+        
+        # Increment template index for next time
+        self.template_index += 1
+        
+        # Format the tweet
+        tweet = template.format(
+            product_name=product_name,
+            color_info=color_info,
+            size_info=size_info,
+            price=price,
+            stock_info=stock_info,
+            limit_info=limit_info,
+            link=link
+        )
+        
+        # Add hashtags if enabled
+        if self.include_hashtags:
+            hashtags = ' '.join([f'#{tag}' for tag in self.default_hashtags])
+            # Only add if we have room
+            if len(tweet) + len(hashtags) + 2 <= 280:
+                tweet = f"{tweet}\n\n{hashtags}"
+        
+        # Add retailer info if available and we have room
+        if 'retailer' in data and len(tweet) < 240:
+            tweet = tweet.replace(link, f"{data['retailer']}: {link}")
+        
+        logger.info(f"Created tweet ({len(tweet)} chars): {tweet[:100]}...")
+        
+        return tweet
+    
+    def create_tweet_from_text(self, text: str) -> str:
+        """Handle regular text messages (passthrough with minor cleanup)"""
+        # Just clean up the text a bit
+        text = text.strip()
+        
+        # Truncate if needed
+        if len(text) > 280:
+            text = text[:277] + "..."
+        
+        return text
+
 
 class TwitterRateLimiter:
     """Manages Twitter API rate limits to prevent exceeding quotas"""
@@ -91,6 +322,7 @@ class MessageFilter:
         self.require_attachments = config.get('require_attachments', False)
         self.exclude_bots = config.get('exclude_bots', True)
         self.custom_regex = config.get('custom_regex', None)
+        self.require_embeds = config.get('require_embeds', False)  # New option
         
         logger.info(f"Message filter initialized: enabled={self.enabled}, min_length={self.min_length}, max_length={self.max_length}")
         logger.info(f"Filter settings: required_keywords={self.required_keywords}, excluded_keywords={self.excluded_keywords}")
@@ -101,7 +333,10 @@ class MessageFilter:
         Returns (should_post: bool, reason: str)
         """
         logger.debug(f"Filtering message from {message.author.name} (ID: {message.author.id})")
-        logger.debug(f"Message content: {message.content[:100]}{'...' if len(message.content) > 100 else ''}")
+        
+        # Log if message has embeds
+        if message.embeds:
+            logger.debug(f"Message has {len(message.embeds)} embed(s)")
         
         if not self.enabled:
             logger.debug("Filtering disabled")
@@ -124,27 +359,45 @@ class MessageFilter:
                 logger.debug(f"Message rejected: user roles {user_roles} don't match required {self.required_roles}")
                 return False, "User missing required roles"
         
-        # Check message length
-        content_length = len(message.content)
-        if content_length < self.min_length:
-            logger.debug(f"Message rejected: too short ({content_length} < {self.min_length})")
-            return False, f"Message too short ({content_length} < {self.min_length})"
+        # Check if embeds are required
+        if self.require_embeds and not message.embeds:
+            logger.debug("Message rejected: no embeds found")
+            return False, "No embeds found"
         
-        if content_length > self.max_length:
-            logger.debug(f"Message rejected: too long ({content_length} > {self.max_length})")
-            return False, f"Message too long ({content_length} > {self.max_length})"
+        # For messages with embeds, check the embed content
+        content_to_check = message.content
+        if message.embeds:
+            # Check embed title, description, and fields for keywords
+            for embed in message.embeds:
+                if embed.title:
+                    content_to_check += " " + embed.title
+                if embed.description:
+                    content_to_check += " " + embed.description
+                for field in embed.fields:
+                    content_to_check += " " + field.name + " " + field.value
+        
+        # Check message length (only for text messages, embeds handled separately)
+        if not message.embeds:
+            content_length = len(message.content)
+            if content_length < self.min_length:
+                logger.debug(f"Message rejected: too short ({content_length} < {self.min_length})")
+                return False, f"Message too short ({content_length} < {self.min_length})"
+            
+            if content_length > self.max_length:
+                logger.debug(f"Message rejected: too long ({content_length} > {self.max_length})")
+                return False, f"Message too long ({content_length} > {self.max_length})"
         
         # Check required keywords
         if self.required_keywords:
-            message_lower = message.content.lower()
-            if not any(keyword.lower() in message_lower for keyword in self.required_keywords):
+            content_lower = content_to_check.lower()
+            if not any(keyword.lower() in content_lower for keyword in self.required_keywords):
                 logger.debug(f"Message rejected: missing required keywords {self.required_keywords}")
                 return False, "Missing required keywords"
         
         # Check excluded keywords
         if self.excluded_keywords:
-            message_lower = message.content.lower()
-            if any(keyword.lower() in message_lower for keyword in self.excluded_keywords):
+            content_lower = content_to_check.lower()
+            if any(keyword.lower() in content_lower for keyword in self.excluded_keywords):
                 logger.debug(f"Message rejected: contains excluded keywords")
                 return False, "Contains excluded keywords"
         
@@ -155,7 +408,7 @@ class MessageFilter:
         
         # Check custom regex
         if self.custom_regex:
-            if not re.search(self.custom_regex, message.content):
+            if not re.search(self.custom_regex, content_to_check):
                 logger.debug(f"Message rejected: doesn't match regex {self.custom_regex}")
                 return False, "Does not match custom regex"
         
@@ -197,7 +450,8 @@ class DiscordTwitterBot(commands.Bot):
                 'access_token_secret': os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
             },
             'rate_limits': file_config.get('rate_limits', {'hourly': 50, 'daily': 100}),
-            'filters': file_config.get('filters', {})
+            'filters': file_config.get('filters', {}),
+            'embed_settings': file_config.get('embed_settings', {})
         }
         
         # Log configuration (without sensitive data)
@@ -223,6 +477,9 @@ class DiscordTwitterBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error initializing Twitter client: {e}")
             raise
+        
+        # Initialize embed parser
+        self.embed_parser = EmbedParser(self.config.get('embed_settings', {}))
         
         # Initialize filter and rate limiter
         self.message_filter = MessageFilter(self.config.get('filters', {}))
@@ -292,7 +549,7 @@ class DiscordTwitterBot(commands.Bot):
         if self.log_channel_id:
             log_channel = self.get_channel(self.log_channel_id)
             if log_channel:
-                await log_channel.send("✅ Discord-Twitter bot is now online!")
+                await log_channel.send("✅ Discord-Twitter bot is now online! (Now with embed support)")
                 logger.info(f"Sent startup message to log channel {self.log_channel_id}")
             else:
                 logger.warning(f"Could not find log channel with ID {self.log_channel_id}")
@@ -308,6 +565,8 @@ class DiscordTwitterBot(commands.Bot):
             return
         
         logger.info(f"New message in monitored channel from {message.author.name} (ID: {message.author.id})")
+        if message.embeds:
+            logger.info(f"Message contains {len(message.embeds)} embed(s)")
         
         # Process commands first
         await self.process_commands(message)
@@ -332,14 +591,15 @@ class DiscordTwitterBot(commands.Bot):
         
         # Post to Twitter
         try:
-            logger.info(f"Attempting to post to Twitter: {message.content[:50]}...")
-            await self._post_to_twitter(message)
+            logger.info("Attempting to post to Twitter")
+            tweet_text = await self._post_to_twitter(message)
             self.rate_limiter.record_post()
             
             status = self.rate_limiter.get_status()
             logger.info(f"Successfully posted to Twitter. Remaining - Hourly: {status['hourly_remaining']}, Daily: {status['daily_remaining']}")
             await self._log(
                 f"✅ Posted to Twitter from {message.author.name}\n"
+                f"Tweet preview: {tweet_text[:100]}...\n"
                 f"Remaining - Hourly: {status['hourly_remaining']}, Daily: {status['daily_remaining']}"
             )
             
@@ -371,18 +631,26 @@ class DiscordTwitterBot(commands.Bot):
             await self._log(f"❌ Error posting to Twitter: {str(e)}")
             await message.add_reaction('❌')
     
-    async def _post_to_twitter(self, message: discord.Message):
-        """Post message content to Twitter"""
-        # Prepare tweet text
-        tweet_text = message.content
+    async def _post_to_twitter(self, message: discord.Message) -> str:
+        """Post message content to Twitter, handling both embeds and text"""
         
-        # Truncate if needed (keeping some space for potential added text)
-        max_length = 280
-        if len(tweet_text) > max_length:
-            logger.debug(f"Truncating tweet from {len(tweet_text)} to {max_length} characters")
-            tweet_text = tweet_text[:max_length-3] + "..."
+        # Check if message has embeds
+        if message.embeds:
+            logger.info(f"Processing message with {len(message.embeds)} embed(s)")
+            # Use the first embed
+            embed = message.embeds[0]
+            tweet_text = self.embed_parser.create_tweet_from_embed(embed)
+        else:
+            # Regular text message
+            logger.info("Processing text message")
+            tweet_text = self.embed_parser.create_tweet_from_text(message.content)
         
-        logger.debug(f"Posting tweet: {tweet_text}")
+        # Final truncation safety check
+        if len(tweet_text) > 280:
+            logger.warning(f"Tweet too long ({len(tweet_text)} chars), truncating to 280")
+            tweet_text = tweet_text[:277] + "..."
+        
+        logger.info(f"Final tweet text ({len(tweet_text)} chars): {tweet_text}")
         
         # Post tweet
         try:
@@ -392,12 +660,12 @@ class DiscordTwitterBot(commands.Bot):
             if response.data:
                 tweet_id = response.data.get('id')
                 logger.info(f"Tweet ID: {tweet_id}")
+                logger.info(f"Tweet URL: https://twitter.com/i/web/status/{tweet_id}")
         except Exception as e:
             logger.error(f"Error in create_tweet call: {e}")
             raise
         
-        # You can also handle media attachments here if needed
-        # This would require additional Twitter API v2 media upload
+        return tweet_text
     
     async def _log(self, message: str):
         """Send log message to log channel"""
@@ -427,13 +695,15 @@ class DiscordTwitterBot(commands.Bot):
         )
         embed.add_field(
             name="Filters",
-            value=f"Enabled: {self.message_filter.enabled}",
+            value=f"Enabled: {self.message_filter.enabled}\n"
+                  f"Require Embeds: {self.message_filter.require_embeds}",
             inline=False
         )
         embed.add_field(
             name="Configuration",
             value=f"Channel: {self.monitored_channel_id}\n"
-                  f"Log Channel: {self.log_channel_id or 'Not set'}",
+                  f"Log Channel: {self.log_channel_id or 'Not set'}\n"
+                  f"Templates: {len(self.embed_parser.custom_templates or self.embed_parser.TWEET_TEMPLATES)}",
             inline=False
         )
         
@@ -451,6 +721,7 @@ class DiscordTwitterBot(commands.Bot):
                 self.author = author
                 self.attachments = attachments or []
                 self.guild = ctx.guild
+                self.embeds = []
         
         mock_msg = MockMessage(test_message, ctx.author)
         should_post, reason = self.message_filter.should_post(mock_msg)
@@ -459,6 +730,31 @@ class DiscordTwitterBot(commands.Bot):
             await ctx.send(f"✅ This message would be posted! Reason: {reason}")
         else:
             await ctx.send(f"❌ This message would NOT be posted. Reason: {reason}")
+    
+    @commands.command(name='test_embed')
+    async def test_embed(self, ctx):
+        """Test embed parsing on the most recent embed in the channel"""
+        logger.info(f"Test embed command invoked by {ctx.author.name}")
+        
+        # Look for the most recent message with an embed
+        async for msg in ctx.channel.history(limit=50):
+            if msg.embeds:
+                embed = msg.embeds[0]
+                tweet_text = self.embed_parser.create_tweet_from_embed(embed)
+                
+                # Send preview
+                preview_embed = discord.Embed(
+                    title="Tweet Preview",
+                    description=f"```{tweet_text}```",
+                    color=0x1DA1F2
+                )
+                preview_embed.add_field(name="Character Count", value=f"{len(tweet_text)}/280")
+                preview_embed.set_footer(text=f"Based on embed from message by {msg.author.name}")
+                
+                await ctx.send(embed=preview_embed)
+                return
+        
+        await ctx.send("❌ No recent embeds found in this channel!")
     
     @commands.command(name='reload_config')
     @commands.has_permissions(administrator=True)
@@ -472,15 +768,15 @@ class DiscordTwitterBot(commands.Bot):
             # Update config (keeping environment variable credentials)
             self.config['rate_limits'] = file_config.get('rate_limits', {'hourly': 50, 'daily': 100})
             self.config['filters'] = file_config.get('filters', {})
+            self.config['embed_settings'] = file_config.get('embed_settings', {})
             
-            # Reinitialize filter with new config
+            # Reinitialize components
             self.message_filter = MessageFilter(self.config.get('filters', {}))
-            
-            # Reinitialize rate limiter with new limits
             self.rate_limiter = TwitterRateLimiter(
                 max_posts_per_hour=self.config.get('rate_limits', {}).get('hourly', 50),
                 max_posts_per_day=self.config.get('rate_limits', {}).get('daily', 100)
             )
+            self.embed_parser = EmbedParser(self.config.get('embed_settings', {}))
             
             logger.info("Configuration reloaded successfully")
             await ctx.send("✅ Configuration reloaded successfully!")
@@ -492,7 +788,7 @@ class DiscordTwitterBot(commands.Bot):
 def main():
     """Main entry point"""
     logger.info("=" * 60)
-    logger.info("Starting Discord-Twitter Bot")
+    logger.info("Starting Discord-Twitter Bot with Embed Support")
     logger.info("=" * 60)
     
     # Check for required environment variables
