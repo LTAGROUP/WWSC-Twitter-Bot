@@ -6,8 +6,8 @@
   
   "filters": {
     "enabled": true,
-    "min_length": 10,
-    "max_length": 280,
+    "min_length": 0,
+    "max_length": 500,
     "required_keywords": [],
     "excluded_keywords": [],
     "required_roles": [],
