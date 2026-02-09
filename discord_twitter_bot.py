@@ -888,18 +888,46 @@ def main():
     
     logger.info("All required environment variables present")
     
-    # Initialize and run bot
-    try:
-        bot = DiscordTwitterBot('config.json')
-        
-        # Get Discord token from environment
-        discord_token = os.getenv('DISCORD_TOKEN')
-        
-        logger.info("Starting bot...")
-        bot.run(discord_token)
-    except Exception as e:
-        logger.error(f"Fatal error starting bot: {e}", exc_info=True)
-        raise
+    # Initialize and run bot with retry logic for rate limits
+    max_retries = 5
+    retry_delay = 60  # Start with 60 seconds
+    
+    for attempt in range(max_retries):
+        try:
+            bot = DiscordTwitterBot('config.json')
+            
+            # Get Discord token from environment
+            discord_token = os.getenv('DISCORD_TOKEN')
+            
+            logger.info("Starting bot...")
+            bot.run(discord_token)
+            break  # If successful, exit the loop
+            
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limit error
+                if attempt < max_retries - 1:
+                    logger.warning("=" * 60)
+                    logger.warning(f"Discord rate limit hit (attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"Waiting {retry_delay} seconds before retry...")
+                    logger.warning("This happens when the bot is restarted too frequently")
+                    logger.warning("=" * 60)
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    logger.info(f"Retrying connection (attempt {attempt + 2}/{max_retries})...")
+                else:
+                    logger.error("=" * 60)
+                    logger.error("Max retries reached. Discord is rate limiting the bot.")
+                    logger.error("Please wait 15-30 minutes before restarting.")
+                    logger.error("=" * 60)
+                    raise
+            else:
+                # Other HTTP error
+                logger.error(f"Discord HTTP error: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Fatal error starting bot: {e}", exc_info=True)
+            raise
 
 
 if __name__ == '__main__':
