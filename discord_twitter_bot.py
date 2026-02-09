@@ -523,15 +523,87 @@ class DiscordTwitterBot(commands.Bot):
             )
             logger.info("Tweepy client created successfully")
             
-            # Test the connection by getting the authenticated user
+            # Test 1: Bearer Token auth (read-only)
+            logger.info("=" * 60)
+            logger.info("AUTHENTICATION TEST 1: Bearer Token (OAuth 2.0)")
+            logger.info("=" * 60)
             try:
-                me = client.get_me()
-                logger.info(f"Successfully authenticated as Twitter user: {me.data.username if me.data else 'Unknown'}")
+                test_client = tweepy.Client(bearer_token=twitter_config.get('bearer_token'))
+                result = test_client.get_user(username='Twitter')
+                if result.data:
+                    logger.info(f"✓ Bearer Token works - Read access confirmed")
+                else:
+                    logger.warning("⚠ Bearer Token auth unclear")
             except Exception as e:
-                logger.warning(f"Could not verify Twitter authentication during initialization: {e}")
-                logger.warning("Will attempt to post when messages arrive")
+                logger.error(f"✗ Bearer Token FAILED: {e}")
+            
+            # Test 2: OAuth 1.0a (needed for posting)
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("AUTHENTICATION TEST 2: OAuth 1.0a (Posting tweets)")
+            logger.info("=" * 60)
+            try:
+                test_client_oauth = tweepy.Client(
+                    consumer_key=twitter_config.get('api_key'),
+                    consumer_secret=twitter_config.get('api_secret'),
+                    access_token=twitter_config.get('access_token'),
+                    access_token_secret=twitter_config.get('access_token_secret')
+                )
+                me = test_client_oauth.get_me()
+                if me.data:
+                    logger.info(f"✓ OAuth 1.0a works - Authenticated as @{me.data.username}")
+                    logger.info(f"✓ User ID: {me.data.id}")
+                    logger.info("✓✓✓ TWITTER CREDENTIALS FULLY WORKING ✓✓✓")
+                    logger.info("✓ Bot can post tweets successfully")
+                else:
+                    logger.warning("⚠ OAuth 1.0a response unclear")
+            except tweepy.errors.Unauthorized as e:
+                logger.error("=" * 60)
+                logger.error("✗✗✗ OAUTH 1.0a AUTHENTICATION FAILED ✗✗✗")
+                logger.error("=" * 60)
+                logger.error(f"Error: {e}")
+                if hasattr(e, 'response') and e.response:
+                    try:
+                        logger.error(f"Response: {e.response.text}")
+                    except:
+                        pass
+                logger.error("")
+                logger.error("THIS IS THE PROBLEM preventing tweet posting!")
+                logger.error("")
+                logger.error("Root cause: Your Access Token or Access Token Secret is invalid")
+                logger.error("")
+                logger.error("SOLUTION (follow exactly):")
+                logger.error("1. Go to: https://developer.twitter.com/en/portal/dashboard")
+                logger.error("2. Click on your app name")
+                logger.error("3. Go to 'Settings' tab")
+                logger.error("4. Scroll to 'User authentication settings'")
+                logger.error("5. Click 'Edit' or 'Set up' if not configured")
+                logger.error("6. Under 'App permissions', select 'Read and Write'")
+                logger.error("7. Fill in any required OAuth fields")
+                logger.error("8. Click 'Save'")
+                logger.error("9. Go to 'Keys and tokens' tab")
+                logger.error("10. Under 'Access Token and Secret', click 'Regenerate'")
+                logger.error("11. Copy the NEW Access Token")
+                logger.error("12. Copy the NEW Access Token Secret")
+                logger.error("13. In Render: Settings → Environment → Edit TWITTER_ACCESS_TOKEN")
+                logger.error("14. In Render: Settings → Environment → Edit TWITTER_ACCESS_TOKEN_SECRET")
+                logger.error("15. Click 'Save Changes' and redeploy")
+                logger.error("")
+                logger.error("IMPORTANT: Old tokens don't get new permissions automatically!")
+                logger.error("You MUST regenerate after changing permissions!")
+                logger.error("=" * 60)
+                raise ValueError("Twitter OAuth 1.0a authentication failed - see logs above for fix")
+            except Exception as e:
+                logger.error(f"✗ OAuth 1.0a test error: {type(e).__name__}: {e}")
+                raise
+            
+            logger.info("=" * 60)
+            logger.info("")
             
             return client
+        except ValueError:
+            # Re-raise auth failures
+            raise
         except Exception as e:
             logger.error(f"Error creating Tweepy client: {e}")
             raise
