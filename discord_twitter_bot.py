@@ -6,10 +6,16 @@ import re
 import os
 import logging
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import asyncio
 from collections import deque
+try:
+    import requests
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+except ImportError:
+    RequestsConnectionError = ConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -243,14 +249,8 @@ class EmbedParser:
     
     def create_tweet_from_text(self, text: str) -> str:
         """Handle regular text messages (passthrough with minor cleanup)"""
-        # Just clean up the text a bit
-        text = text.strip()
-        
-        # Truncate if needed
-        if len(text) > 280:
-            text = text[:277] + "..."
-        
-        return text
+        # Return cleaned text as-is - truncation happens at post time
+        return text.strip()
 
 
 class TwitterRateLimiter:
@@ -720,36 +720,69 @@ class DiscordTwitterBot(commands.Bot):
     async def _post_to_twitter(self, message: discord.Message) -> str:
         """Post message content to Twitter, handling both embeds and text"""
         
+        # Twitter's hard character limit - read from config, defaults to 280
+        # Set to 25000 in config if you have Twitter Blue/X Premium
+        TWITTER_CHAR_LIMIT = self.config.get('twitter_char_limit', 280)
+        
         # Check if message has embeds
         if message.embeds:
             logger.info(f"Processing message with {len(message.embeds)} embed(s)")
-            # Use the first embed
             embed = message.embeds[0]
             tweet_text = self.embed_parser.create_tweet_from_embed(embed)
         else:
-            # Regular text message
             logger.info("Processing text message")
             tweet_text = self.embed_parser.create_tweet_from_text(message.content)
         
-        # Final truncation safety check
-        if len(tweet_text) > 280:
-            logger.warning(f"Tweet too long ({len(tweet_text)} chars), truncating to 280")
-            tweet_text = tweet_text[:277] + "..."
+        # Truncate to Twitter's character limit if needed
+        if len(tweet_text) > TWITTER_CHAR_LIMIT:
+            logger.warning(f"Tweet too long ({len(tweet_text)} chars), truncating to {TWITTER_CHAR_LIMIT}")
+            tweet_text = tweet_text[:TWITTER_CHAR_LIMIT - 3] + "..."
         
-        logger.info(f"Final tweet text ({len(tweet_text)} chars): {tweet_text}")
+        logger.info(f"Final tweet text ({len(tweet_text)} chars):\n{tweet_text}")
         
-        # Post tweet
-        try:
-            response = self.twitter_client.create_tweet(text=tweet_text)
-            logger.info(f"Tweet posted successfully. Response: {response}")
-            
-            if response.data:
-                tweet_id = response.data.get('id')
-                logger.info(f"Tweet ID: {tweet_id}")
-                logger.info(f"Tweet URL: https://twitter.com/i/web/status/{tweet_id}")
-        except Exception as e:
-            logger.error(f"Error in create_tweet call: {e}")
-            raise
+        # Post tweet with retry logic for transient connection errors
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    logger.info(f"Retry attempt {attempt}/{max_retries - 1} after {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # backoff: 5s then 10s
+                
+                response = self.twitter_client.create_tweet(text=tweet_text)
+                logger.info(f"Tweet posted successfully. Response: {response}")
+                
+                if response.data:
+                    tweet_id = response.data.get('id')
+                    logger.info(f"Tweet ID: {tweet_id}")
+                    logger.info(f"Tweet URL: https://twitter.com/i/web/status/{tweet_id}")
+                
+                return tweet_text  # Success - exit retry loop
+                
+            except (ConnectionResetError, ConnectionError, RequestsConnectionError) as e:
+                logger.warning(f"Connection error on attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Will retry in {retry_delay}s...")
+                else:
+                    logger.error(f"All {max_retries} attempts failed with connection errors")
+                    raise
+                    
+            except Exception as e:
+                # Check if the exception wraps a connection reset (tweepy wraps requests errors)
+                error_str = str(e).lower()
+                if 'connection' in error_str and ('reset' in error_str or 'aborted' in error_str):
+                    logger.warning(f"Wrapped connection error on attempt {attempt + 1}/{max_retries}: {e}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Will retry in {retry_delay}s...")
+                        continue
+                    else:
+                        logger.error(f"All {max_retries} attempts failed with connection errors")
+                        raise
+                # Auth errors, rate limits, etc. - don't retry these
+                logger.error(f"Error in create_tweet call: {e}")
+                raise
         
         return tweet_text
     
