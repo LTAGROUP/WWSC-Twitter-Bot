@@ -1,13 +1,15 @@
 {
+  "twitter_char_limit": 25000,
+
   "rate_limits": {
     "hourly": 50,
     "daily": 100
   },
   
   "filters": {
-    "enabled": true,
-    "min_length": 0,
-    "max_length": 500,
+    "enabled": false,
+    "min_length": 10,
+    "max_length": 10000,
     "required_keywords": [],
     "excluded_keywords": [],
     "required_roles": [],
