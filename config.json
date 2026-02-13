@@ -7,7 +7,7 @@
   },
   
   "filters": {
-    "enabled": false,
+    "enabled": true,
     "min_length": 0,
     "max_length": 10000,
     "required_keywords": [],
