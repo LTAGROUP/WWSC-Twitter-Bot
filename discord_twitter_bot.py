@@ -175,76 +175,41 @@ class EmbedParser:
         
         return f"\n📦 Limit: {limit_str}"
     
+    def get_embed_image_url(self, embed: discord.Embed) -> Optional[str]:
+        """Extract image URL from embed (checks image then thumbnail)"""
+        if embed.image and embed.image.url:
+            return embed.image.url
+        if embed.thumbnail and embed.thumbnail.url:
+            return embed.thumbnail.url
+        return None
+
     def create_tweet_from_embed(self, embed: discord.Embed) -> str:
-        """Convert embed to a natural-sounding tweet"""
+        """Convert embed to a tweet with only essential info: name, price, link, #ad"""
         data = self.parse_embed(embed)
-        
-        # Ensure we have minimum required info
-        if 'product_name' not in data:
-            data['product_name'] = embed.title or "Product"
-            logger.warning("No product name found, using default")
-        
-        if 'link' not in data:
+
+        # Name
+        name = data.get('product_name') or embed.title or "Product"
+
+        # Price (optional)
+        price_line = ""
+        if 'price' in data:
+            price_line = self.format_price(data['price'])
+
+        # Link
+        link = data.get('link', '')
+        if not link:
             logger.warning("No link found in embed")
-            data['link'] = "Link in bio"  # Fallback
-        
-        # Format the data components
-        product_name = data['product_name']
-        
-        # Optional components with natural formatting
-        color_info = ""
-        if 'color' in data:
-            color_info = f" • {data['color']}"
-        
-        size_info = ""
-        if 'size' in data:
-            size_info = f" • {data['size']}"
-        
-        price = self.format_price(data.get('price', 'Check site for pricing'))
-        
-        stock_info = ""
-        if 'stock' in data:
-            stock_info = self.format_stock_info(data['stock'])
-        
-        limit_info = ""
-        if 'limit' in data:
-            limit_info = self.format_limit_info(data['limit'])
-        
-        link = data['link']
-        
-        # Select template (use custom if available, otherwise rotate through defaults)
-        if self.custom_templates:
-            template = self.custom_templates[self.template_index % len(self.custom_templates)]
-        else:
-            template = self.TWEET_TEMPLATES[self.template_index % len(self.TWEET_TEMPLATES)]
-        
-        # Increment template index for next time
-        self.template_index += 1
-        
-        # Format the tweet
-        tweet = template.format(
-            product_name=product_name,
-            color_info=color_info,
-            size_info=size_info,
-            price=price,
-            stock_info=stock_info,
-            limit_info=limit_info,
-            link=link
-        )
-        
-        # Add hashtags if enabled
-        if self.include_hashtags:
-            hashtags = ' '.join([f'#{tag}' for tag in self.default_hashtags])
-            # Only add if we have room
-            if len(tweet) + len(hashtags) + 2 <= 280:
-                tweet = f"{tweet}\n\n{hashtags}"
-        
-        # Add retailer info if available and we have room
-        if 'retailer' in data and len(tweet) < 240:
-            tweet = tweet.replace(link, f"{data['retailer']}: {link}")
-        
+
+        # Build tweet: name, price (if present), link, #ad
+        lines = [name]
+        if price_line:
+            lines.append(price_line)
+        if link:
+            lines.append(link)
+        lines.append("#ad")
+
+        tweet = "\n".join(lines)
         logger.info(f"Created tweet ({len(tweet)} chars): {tweet[:100]}...")
-        
         return tweet
     
     def create_tweet_from_text(self, text: str) -> str:
@@ -717,6 +682,47 @@ class DiscordTwitterBot(commands.Bot):
             await self._log(f"❌ Error posting to Twitter: {str(e)}")
             await message.add_reaction('❌')
     
+    async def _upload_image_to_twitter(self, image_url: str) -> Optional[str]:
+        """Download image from URL and upload to Twitter, returning media_id"""
+        import tempfile
+        import mimetypes
+        try:
+            logger.info(f"Downloading image: {image_url}")
+            resp = requests.get(image_url, timeout=15)
+            resp.raise_for_status()
+
+            # Detect file extension from content-type or URL
+            content_type = resp.headers.get('content-type', 'image/jpeg').split(';')[0].strip()
+            ext = mimetypes.guess_extension(content_type) or '.jpg'
+            if ext == '.jpe':
+                ext = '.jpg'
+
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            logger.info(f"Uploading image to Twitter ({len(resp.content)} bytes, {content_type})")
+            # Use tweepy v1 API for media upload (v2 doesn't support it directly)
+            tw = self.config.get('twitter', {})
+            auth = tweepy.OAuth1UserHandler(
+                consumer_key=tw.get('api_key'),
+                consumer_secret=tw.get('api_secret'),
+                access_token=tw.get('access_token'),
+                access_token_secret=tw.get('access_token_secret')
+            )
+            api_v1 = tweepy.API(auth)
+            media = api_v1.media_upload(filename=tmp_path)
+            media_id = str(media.media_id)
+            logger.info(f"Image uploaded successfully, media_id: {media_id}")
+
+            import os as _os
+            _os.unlink(tmp_path)
+            return media_id
+
+        except Exception as e:
+            logger.warning(f"Failed to upload image (tweet will post without it): {e}")
+            return None
+
     async def _post_to_twitter(self, message: discord.Message) -> str:
         """Post message content to Twitter, handling both embeds and text"""
         
@@ -724,11 +730,12 @@ class DiscordTwitterBot(commands.Bot):
         # Set to 25000 in config if you have Twitter Blue/X Premium
         TWITTER_CHAR_LIMIT = self.config.get('twitter_char_limit', 280)
         
-        # Check if message has embeds
+        image_url = None
         if message.embeds:
             logger.info(f"Processing message with {len(message.embeds)} embed(s)")
             embed = message.embeds[0]
             tweet_text = self.embed_parser.create_tweet_from_embed(embed)
+            image_url = self.embed_parser.get_embed_image_url(embed)
         else:
             logger.info("Processing text message")
             tweet_text = self.embed_parser.create_tweet_from_text(message.content)
@@ -739,6 +746,12 @@ class DiscordTwitterBot(commands.Bot):
             tweet_text = tweet_text[:TWITTER_CHAR_LIMIT - 3] + "..."
         
         logger.info(f"Final tweet text ({len(tweet_text)} chars):\n{tweet_text}")
+
+        # Upload image if present
+        media_id = None
+        if image_url:
+            logger.info(f"Found image in embed: {image_url}")
+            media_id = await self._upload_image_to_twitter(image_url)
         
         # Post tweet with retry logic for transient connection errors
         max_retries = 3
@@ -751,7 +764,11 @@ class DiscordTwitterBot(commands.Bot):
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # backoff: 5s then 10s
                 
-                response = self.twitter_client.create_tweet(text=tweet_text)
+                kwargs = {"text": tweet_text}
+                if media_id:
+                    kwargs["media_ids"] = [media_id]
+
+                response = self.twitter_client.create_tweet(**kwargs)
                 logger.info(f"Tweet posted successfully. Response: {response}")
                 
                 if response.data:
