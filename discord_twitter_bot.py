@@ -80,32 +80,48 @@ class EmbedParser:
         
         logger.info("Embed parser initialized")
     
+    @staticmethod
+    def _extract_url(value: str) -> str:
+        """Extract a plain URL from a string that may contain Discord markdown links like [text](url)"""
+        # Match markdown link [text](url)
+        md_match = re.search(r'\[.*?\]\((https?://[^\s\)]+)\)', value)
+        if md_match:
+            return md_match.group(1)
+        # Fall back to bare URL
+        url_match = re.search(r'https?://\S+', value)
+        if url_match:
+            return url_match.group(0)
+        return value
+
     def parse_embed(self, embed: discord.Embed) -> Dict[str, str]:
         """Extract structured data from a Discord embed"""
         data = {}
-        
+
         # Get title as product name if available
         if embed.title:
             data['product_name'] = embed.title
             logger.debug(f"Found product name in title: {embed.title}")
-        
+
         # Get URL from embed if available
         if embed.url:
             data['link'] = embed.url
             logger.debug(f"Found link in embed URL: {embed.url}")
-        
+
         # Parse fields
         for field in embed.fields:
             field_name = field.name.lower().strip()
             field_value = field.value.strip()
-            
+
             # Match field name to our known categories
             for category, variations in self.FIELD_MAPPINGS.items():
                 if any(var in field_name for var in variations):
+                    # For link fields, strip markdown formatting to get a plain URL
+                    if category == 'link':
+                        field_value = self._extract_url(field_value)
                     data[category] = field_value
                     logger.debug(f"Matched field '{field.name}' to category '{category}': {field_value}")
                     break
-        
+
         # Parse description for additional info if fields are sparse
         if embed.description and len(data) < 3:
             # Try to extract link from description
@@ -113,14 +129,14 @@ class EmbedParser:
             if url_match and 'link' not in data:
                 data['link'] = url_match.group(0)
                 logger.debug(f"Extracted link from description: {data['link']}")
-        
+
         # Parse footer for additional metadata
         if embed.footer and embed.footer.text:
             footer_text = embed.footer.text.lower()
             # Check for stock info in footer
             if 'stock' in footer_text or 'available' in footer_text:
                 data['stock'] = embed.footer.text
-        
+
         logger.info(f"Parsed embed data: {list(data.keys())}")
         return data
     
@@ -184,31 +200,61 @@ class EmbedParser:
         return None
 
     def create_tweet_from_embed(self, embed: discord.Embed) -> str:
-        """Convert embed to a tweet with only essential info: name, price, link, #ad"""
+        """Convert embed to a tweet: Name, QTY (if available), Limit (if available), Price, Link"""
         data = self.parse_embed(embed)
 
         # Name
         name = data.get('product_name') or embed.title or "Product"
+
+        # QTY available (optional)
+        qty_line = ""
+        if 'stock' in data:
+            stock_val = data['stock'].strip()
+            if stock_val:
+                qty_line = f"Qty: {stock_val}"
+
+        # Order limit (optional)
+        limit_line = ""
+        if 'limit' in data:
+            limit_val = data['limit'].strip()
+            if limit_val:
+                limit_line = f"Limit: {limit_val}"
 
         # Price (optional)
         price_line = ""
         if 'price' in data:
             price_line = self.format_price(data['price'])
 
-        # Link
+        # Link — plain URL only, no markdown, no extra retailer links
         link = data.get('link', '')
         if not link:
             logger.warning("No link found in embed")
 
-        # Build tweet: name, price (if present), link, #ad
+        # Build tweet in order: Name, QTY, Limit, Price, Link
         lines = [name]
+        if qty_line:
+            lines.append(qty_line)
+        if limit_line:
+            lines.append(limit_line)
         if price_line:
             lines.append(price_line)
         if link:
             lines.append(link)
-        lines.append("#ad")
 
         tweet = "\n".join(lines)
+
+        # Truncate to 280 chars if needed, preserving the link at the end
+        if len(tweet) > 280:
+            if link:
+                # Reserve space for newline + link
+                max_body = 280 - len(link) - 1
+                body = "\n".join(lines[:-1])
+                if len(body) > max_body:
+                    body = body[:max_body - 1] + "…"
+                tweet = body + "\n" + link
+            else:
+                tweet = tweet[:279] + "…"
+
         logger.info(f"Created tweet ({len(tweet)} chars): {tweet[:100]}...")
         return tweet
     
