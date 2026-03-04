@@ -115,6 +115,10 @@ class EmbedParser:
             # Match field name to our known categories
             for category, variations in self.FIELD_MAPPINGS.items():
                 if any(var in field_name for var in variations):
+                    # Never overwrite the embed title URL with retailer link fields
+                    if category == 'link' and 'link' in data:
+                        logger.debug(f"Skipping field '{field.name}' — embed URL already set")
+                        break
                     # For link fields, strip markdown formatting to get a plain URL
                     if category == 'link':
                         field_value = self._extract_url(field_value)
@@ -230,7 +234,7 @@ class EmbedParser:
         if not link:
             logger.warning("No link found in embed")
 
-        # Build tweet in order: Name, QTY, Limit, Price, Link
+        # Build tweet in order: Name, QTY, Limit, Price, Link, #ad
         lines = [name]
         if qty_line:
             lines.append(qty_line)
@@ -240,20 +244,28 @@ class EmbedParser:
             lines.append(price_line)
         if link:
             lines.append(link)
+        lines.append("#ad")
 
         tweet = "\n".join(lines)
 
-        # Truncate to 280 chars if needed, preserving the link at the end
+        # Truncate to 280 chars if needed, always preserving link and #ad at the end
         if len(tweet) > 280:
             if link:
-                # Reserve space for newline + link
-                max_body = 280 - len(link) - 1
-                body = "\n".join(lines[:-1])
+                # Reserve space for \nlink\n#ad
+                suffix = "\n" + link + "\n#ad"
+                max_body = 280 - len(suffix)
+                body = "\n".join(lines[:-2])  # Everything before link and #ad
                 if len(body) > max_body:
                     body = body[:max_body - 1] + "…"
-                tweet = body + "\n" + link
+                tweet = body + suffix
             else:
-                tweet = tweet[:279] + "…"
+                # Reserve space for \n#ad
+                suffix = "\n#ad"
+                max_body = 280 - len(suffix)
+                body = "\n".join(lines[:-1])  # Everything before #ad
+                if len(body) > max_body:
+                    body = body[:max_body - 1] + "…"
+                tweet = body + suffix
 
         logger.info(f"Created tweet ({len(tweet)} chars): {tweet[:100]}...")
         return tweet
