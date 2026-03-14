@@ -4,7 +4,7 @@ import { cookies } from 'next/headers';
 const JWT_SECRET = new TextEncoder().encode(
   process.env.JWT_SECRET || 'dev-secret-change-in-production'
 );
-const COOKIE_NAME = 'wwsc_session';
+const COOKIE_NAME = 'nexus_session';
 
 export interface SessionUser {
   userId: string;       // Supabase user UUID

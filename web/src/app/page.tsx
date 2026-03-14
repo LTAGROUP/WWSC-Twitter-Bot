@@ -14,7 +14,7 @@ export default async function Home() {
       <Navbar user={null} />
       <main className="flex flex-col items-center justify-center min-h-[80vh] px-4">
         <h1 className="text-4xl font-bold mb-4 text-center">
-          WWSC Twitter Bot
+          Nexus Twitter Bot
         </h1>
         <p className="text-gray-400 text-lg mb-8 text-center max-w-xl">
           Automatically post Discord messages to Twitter. Configure channels,

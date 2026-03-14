@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
 
     if (error || !user) {
       console.error('Failed to upsert user:', error);
-      return NextResponse.redirect(new URL('/?error=db_error', req.url));
+      return NextResponse.redirect(new URL(`/?error=db_error&detail=${error?.code ?? 'no_user'}`, req.url));
     }
 
     await createSession({
