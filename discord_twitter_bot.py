@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import tweepy
 import json
 import re
@@ -11,11 +11,20 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import asyncio
 from collections import deque
+from dataclasses import dataclass, field
 try:
     import requests
     from requests.exceptions import ConnectionError as RequestsConnectionError
 except ImportError:
     RequestsConnectionError = ConnectionError
+
+# Multi-tenant imports
+try:
+    from db import BotDatabase
+    from encryption import decrypt as decrypt_credential
+    MULTI_TENANT = True
+except ImportError:
+    MULTI_TENANT = False
 
 # Configure logging
 logging.basicConfig(
@@ -439,19 +448,62 @@ class MessageFilter:
         return True, "Passed all filters"
 
 
+@dataclass
+class ChannelSetup:
+    """Configuration for a single monitored channel."""
+    config_id: str                  # Supabase channel_config UUID
+    channel_id: int                 # Discord channel ID
+    guild_id: int                   # Discord guild ID
+    twitter_client: tweepy.Client
+    twitter_creds: Dict[str, str]   # For v1 media upload
+    rate_limiter: TwitterRateLimiter
+    message_filter: MessageFilter
+    embed_parser: EmbedParser
+    char_limit: int = 280
+    log_channel_id: Optional[int] = None
+
+
 class DiscordTwitterBot(commands.Bot):
-    """Main bot class that bridges Discord and Twitter"""
-    
+    """Multi-tenant bot class that bridges Discord and Twitter for multiple guilds/channels"""
+
     def __init__(self, config_path: str = 'config.json'):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        
+
         super().__init__(command_prefix='!tw_', intents=intents)
-        
+
         logger.info("Initializing Discord-Twitter Bot")
-        
-        # Load configuration from file (for filters and rate limits)
+
+        # Multi-tenant mode: load from Supabase
+        self.multi_tenant = MULTI_TENANT and os.getenv('SUPABASE_URL')
+
+        # Channel configs keyed by Discord channel_id (int)
+        self.channel_setups: Dict[int, ChannelSetup] = {}
+
+        # Legacy single-tenant fallback
+        self.config = {}
+        self.twitter_client = None
+        self.embed_parser = None
+        self.message_filter = None
+        self.rate_limiter = None
+        self.monitored_channel_id = None
+        self.log_channel_id = None
+        self.config_path = config_path
+        self.db: Optional[BotDatabase] = None
+
+        if self.multi_tenant:
+            logger.info("Multi-tenant mode enabled (Supabase)")
+            self.db = BotDatabase()
+            self._load_configs_from_db()
+        else:
+            logger.info("Single-tenant mode (legacy env vars)")
+            self._init_single_tenant(config_path)
+
+        logger.info("Bot initialization complete")
+
+    def _init_single_tenant(self, config_path: str):
+        """Legacy single-tenant initialization from env vars + config.json"""
         logger.info(f"Loading configuration from {config_path}")
         try:
             with open(config_path, 'r') as f:
@@ -460,8 +512,7 @@ class DiscordTwitterBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error loading configuration file: {e}")
             raise
-        
-        # Override credentials with environment variables
+
         self.config = {
             'discord_channel_id': int(os.getenv('DISCORD_CHANNEL_ID', file_config.get('discord_channel_id', 0))),
             'log_channel_id': int(os.getenv('LOG_CHANNEL_ID', file_config.get('log_channel_id', 0))) if os.getenv('LOG_CHANNEL_ID') or file_config.get('log_channel_id') else None,
@@ -476,51 +527,112 @@ class DiscordTwitterBot(commands.Bot):
             'filters': file_config.get('filters', {}),
             'embed_settings': file_config.get('embed_settings', {})
         }
-        
-        # Log configuration (without sensitive data)
+
         logger.info(f"Discord channel ID: {self.config['discord_channel_id']}")
-        logger.info(f"Log channel ID: {self.config['log_channel_id']}")
         logger.info(f"Twitter API Key present: {bool(self.config['twitter']['api_key'])}")
-        logger.info(f"Twitter API Secret present: {bool(self.config['twitter']['api_secret'])}")
-        logger.info(f"Twitter Bearer Token present: {bool(self.config['twitter']['bearer_token'])}")
-        logger.info(f"Twitter Access Token present: {bool(self.config['twitter']['access_token'])}")
-        logger.info(f"Twitter Access Token Secret present: {bool(self.config['twitter']['access_token_secret'])}")
-        
-        # Log first/last few characters of credentials for verification (helps debug without exposing full keys)
-        if self.config['twitter']['api_key']:
-            logger.debug(f"API Key starts with: {self.config['twitter']['api_key'][:5]}... ends with: ...{self.config['twitter']['api_key'][-5:]}")
-        if self.config['twitter']['access_token']:
-            logger.debug(f"Access Token starts with: {self.config['twitter']['access_token'][:5]}... ends with: ...{self.config['twitter']['access_token'][-5:]}")
-        
-        # Initialize Twitter client
-        logger.info("Initializing Twitter client")
-        try:
-            self.twitter_client = self._init_twitter()
-            logger.info("Twitter client initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing Twitter client: {e}")
-            raise
-        
-        # Initialize embed parser
+
+        self.twitter_client = self._init_twitter()
         self.embed_parser = EmbedParser(self.config.get('embed_settings', {}))
-        
-        # Initialize filter and rate limiter
         self.message_filter = MessageFilter(self.config.get('filters', {}))
         self.rate_limiter = TwitterRateLimiter(
             max_posts_per_hour=self.config.get('rate_limits', {}).get('hourly', 50),
             max_posts_per_day=self.config.get('rate_limits', {}).get('daily', 100)
         )
-        
-        # Monitored channel
         self.monitored_channel_id = self.config.get('discord_channel_id')
-        
-        # Logging
         self.log_channel_id = self.config.get('log_channel_id')
-        
-        # Store config path for reload command
-        self.config_path = config_path
-        
-        logger.info("Bot initialization complete")
+
+    def _load_configs_from_db(self):
+        """Load all channel configurations from Supabase."""
+        if not self.db:
+            return
+
+        configs = self.db.load_all_configs()
+        logger.info(f"Loaded {len(configs)} channel configs from Supabase")
+
+        new_setups: Dict[int, ChannelSetup] = {}
+
+        for cfg in configs:
+            try:
+                twitter_acc = cfg.get('twitter_accounts')
+                if not twitter_acc:
+                    logger.warning(f"Channel config {cfg['id']} has no Twitter account, skipping")
+                    continue
+
+                # Decrypt Twitter credentials
+                creds = {
+                    'api_key': decrypt_credential(twitter_acc['twitter_api_key']),
+                    'api_secret': decrypt_credential(twitter_acc['twitter_api_secret']),
+                    'bearer_token': decrypt_credential(twitter_acc['twitter_bearer_token']),
+                    'access_token': decrypt_credential(twitter_acc['twitter_access_token']),
+                    'access_token_secret': decrypt_credential(twitter_acc['twitter_access_token_secret']),
+                }
+
+                # Create tweepy client for this Twitter account
+                client = tweepy.Client(
+                    bearer_token=creds['bearer_token'],
+                    consumer_key=creds['api_key'],
+                    consumer_secret=creds['api_secret'],
+                    access_token=creds['access_token'],
+                    access_token_secret=creds['access_token_secret']
+                )
+
+                # Build filter config from DB fields
+                filter_config = {
+                    'enabled': cfg.get('filter_enabled', True),
+                    'min_length': cfg.get('filter_min_length', 0),
+                    'max_length': cfg.get('filter_max_length', 10000),
+                    'required_keywords': cfg.get('filter_required_keywords', []),
+                    'excluded_keywords': cfg.get('filter_excluded_keywords', []),
+                    'required_roles': cfg.get('filter_required_roles', []),
+                    'allowed_users': cfg.get('filter_allowed_users', []),
+                    'require_attachments': cfg.get('filter_require_attachments', False),
+                    'exclude_bots': cfg.get('filter_exclude_bots', False),
+                    'require_embeds': cfg.get('filter_require_embeds', False),
+                    'custom_regex': cfg.get('filter_custom_regex'),
+                }
+
+                embed_settings = {
+                    'include_hashtags': cfg.get('embed_include_hashtags', False),
+                    'default_hashtags': cfg.get('embed_default_hashtags', ['restock', 'instock']),
+                    'shorten_links': cfg.get('embed_shorten_links', False),
+                    'tweet_templates': cfg.get('embed_tweet_templates', []),
+                }
+
+                guild_data = cfg.get('guilds', {})
+                guild_discord_id = int(guild_data.get('guild_id', 0)) if guild_data else 0
+                log_ch = guild_data.get('log_channel_id') if guild_data else None
+
+                channel_id = int(cfg['channel_id'])
+
+                # Reuse existing rate limiter if channel already exists (preserves counts)
+                existing = self.channel_setups.get(channel_id)
+                rate_limiter = existing.rate_limiter if existing else TwitterRateLimiter(
+                    max_posts_per_hour=cfg.get('rate_limit_hourly', 50),
+                    max_posts_per_day=cfg.get('rate_limit_daily', 100)
+                )
+
+                setup = ChannelSetup(
+                    config_id=cfg['id'],
+                    channel_id=channel_id,
+                    guild_id=guild_discord_id,
+                    twitter_client=client,
+                    twitter_creds=creds,
+                    rate_limiter=rate_limiter,
+                    message_filter=MessageFilter(filter_config),
+                    embed_parser=EmbedParser(embed_settings),
+                    char_limit=cfg.get('twitter_char_limit', 280),
+                    log_channel_id=int(log_ch) if log_ch else None,
+                )
+
+                new_setups[channel_id] = setup
+                logger.info(f"Configured channel {channel_id} (guild {guild_discord_id}) → Twitter: {twitter_acc.get('account_name', 'unknown')}")
+
+            except Exception as e:
+                logger.error(f"Failed to load config {cfg.get('id', '?')}: {e}", exc_info=True)
+                continue
+
+        self.channel_setups = new_setups
+        logger.info(f"Active channel setups: {len(self.channel_setups)}")
     
     def _init_twitter(self) -> tweepy.Client:
         """Initialize Twitter API client"""
@@ -649,98 +761,224 @@ class DiscordTwitterBot(commands.Bot):
         """Called when bot is ready"""
         logger.info(f'{self.user} has connected to Discord!')
         logger.info(f'Bot ID: {self.user.id}')
-        logger.info(f'Monitoring channel ID: {self.monitored_channel_id}')
-        
+        logger.info(f'Connected to {len(self.guilds)} guild(s)')
+
+        if self.multi_tenant:
+            logger.info(f'Monitoring {len(self.channel_setups)} channel(s) across guilds')
+            # Start periodic config refresh
+            if not self.refresh_configs.is_running():
+                self.refresh_configs.start()
+        else:
+            logger.info(f'Monitoring channel ID: {self.monitored_channel_id}')
+
         print(f'{self.user} has connected to Discord!')
-        print(f'Monitoring channel ID: {self.monitored_channel_id}')
-        
-        # Send startup message to log channel if configured
-        if self.log_channel_id:
+
+        # Send startup messages to log channels
+        if self.multi_tenant:
+            sent_channels = set()
+            for setup in self.channel_setups.values():
+                if setup.log_channel_id and setup.log_channel_id not in sent_channels:
+                    log_channel = self.get_channel(setup.log_channel_id)
+                    if log_channel:
+                        await log_channel.send("✅ Discord-Twitter bot is now online! (Multi-tenant mode)")
+                        sent_channels.add(setup.log_channel_id)
+        elif self.log_channel_id:
             log_channel = self.get_channel(self.log_channel_id)
             if log_channel:
-                await log_channel.send("✅ Discord-Twitter bot is now online! (Now with embed support)")
-                logger.info(f"Sent startup message to log channel {self.log_channel_id}")
-            else:
-                logger.warning(f"Could not find log channel with ID {self.log_channel_id}")
+                await log_channel.send("✅ Discord-Twitter bot is now online!")
+
+    @tasks.loop(seconds=60)
+    async def refresh_configs(self):
+        """Periodically refresh channel configurations from Supabase."""
+        try:
+            self._load_configs_from_db()
+            logger.debug(f"Config refresh: {len(self.channel_setups)} active channels")
+        except Exception as e:
+            logger.error(f"Config refresh failed: {e}")
     
     async def on_message(self, message: discord.Message):
         """Handle incoming Discord messages"""
         # Ignore messages from the bot itself
         if message.author == self.user:
             return
-        
-        # Check if message is from monitored channel
-        if message.channel.id != self.monitored_channel_id:
-            return
-        
-        logger.info(f"New message in monitored channel from {message.author.name} (ID: {message.author.id})")
-        if message.embeds:
-            logger.info(f"Message contains {len(message.embeds)} embed(s)")
-        
-        # Process commands first
+
+        # Process commands first (works in any channel)
         await self.process_commands(message)
-        
-        # Check if message passes filters
+
+        # Multi-tenant: look up channel setup
+        if self.multi_tenant:
+            setup = self.channel_setups.get(message.channel.id)
+            if not setup:
+                return  # Not a monitored channel
+            await self._handle_message_for_channel(message, setup)
+        else:
+            # Legacy single-tenant
+            if message.channel.id != self.monitored_channel_id:
+                return
+            await self._handle_message_legacy(message)
+
+    async def _handle_message_for_channel(self, message: discord.Message, setup: ChannelSetup):
+        """Handle a message for a specific multi-tenant channel configuration."""
+        logger.info(f"[{setup.config_id[:8]}] Message in channel {setup.channel_id} from {message.author.name}")
+
+        # Check filters
+        should_post, reason = setup.message_filter.should_post(message)
+        if not should_post:
+            logger.info(f"[{setup.config_id[:8]}] Not posted: {reason}")
+            return
+
+        # Check rate limits
+        if not setup.rate_limiter.can_post():
+            status = setup.rate_limiter.get_status()
+            logger.warning(f"[{setup.config_id[:8]}] Rate limit reached! H:{status['hourly_remaining']} D:{status['daily_remaining']}")
+            await self._log_to_channel(setup.log_channel_id,
+                f"⚠️ Rate limit reached for channel <#{setup.channel_id}>")
+            return
+
+        # Post to Twitter
+        try:
+            tweet_text = await self._post_to_twitter_mt(message, setup)
+            setup.rate_limiter.record_post()
+
+            # Log to DB
+            if self.db:
+                tweet_id = None  # Will be set if we can extract it
+                self.db.log_tweet(
+                    channel_config_id=setup.config_id,
+                    tweet_text=tweet_text,
+                    tweet_id=tweet_id,
+                    discord_message_id=str(message.id),
+                    status='posted'
+                )
+
+            status = setup.rate_limiter.get_status()
+            logger.info(f"[{setup.config_id[:8]}] Posted. H:{status['hourly_remaining']} D:{status['daily_remaining']}")
+            await self._log_to_channel(setup.log_channel_id,
+                f"✅ Posted to Twitter from {message.author.name}\n"
+                f"Preview: {tweet_text[:100]}...")
+            await message.add_reaction('🐦')
+
+        except tweepy.errors.Unauthorized as e:
+            logger.error(f"[{setup.config_id[:8]}] Twitter 401: {e}")
+            if self.db:
+                self.db.log_tweet(setup.config_id, str(e), status='failed',
+                    discord_message_id=str(message.id), error_message=str(e))
+            await message.add_reaction('❌')
+        except tweepy.errors.Forbidden as e:
+            logger.error(f"[{setup.config_id[:8]}] Twitter 403: {e}")
+            if self.db:
+                self.db.log_tweet(setup.config_id, str(e), status='failed',
+                    discord_message_id=str(message.id), error_message=str(e))
+            await message.add_reaction('❌')
+        except tweepy.errors.TooManyRequests as e:
+            logger.error(f"[{setup.config_id[:8]}] Twitter rate limit: {e}")
+            if self.db:
+                self.db.log_tweet(setup.config_id, str(e), status='rate_limited',
+                    discord_message_id=str(message.id), error_message=str(e))
+            await message.add_reaction('⚠️')
+        except Exception as e:
+            logger.error(f"[{setup.config_id[:8]}] Error posting: {e}", exc_info=True)
+            if self.db:
+                self.db.log_tweet(setup.config_id, str(e), status='failed',
+                    discord_message_id=str(message.id), error_message=str(e))
+            await message.add_reaction('❌')
+
+    async def _handle_message_legacy(self, message: discord.Message):
+        """Handle a message in legacy single-tenant mode."""
+        logger.info(f"New message in monitored channel from {message.author.name}")
+
         should_post, reason = self.message_filter.should_post(message)
-        
         if not should_post:
             logger.info(f"Message not posted: {reason}")
             await self._log(f"❌ Message from {message.author.name} not posted: {reason}")
             return
-        
-        # Check rate limits
+
         if not self.rate_limiter.can_post():
             status = self.rate_limiter.get_status()
             logger.warning(f"Rate limit reached! Hourly: {status['hourly_remaining']}, Daily: {status['daily_remaining']}")
-            await self._log(
-                f"⚠️ Rate limit reached! Hourly: {status['hourly_remaining']}, "
-                f"Daily: {status['daily_remaining']}"
-            )
+            await self._log(f"⚠️ Rate limit reached!")
             return
-        
-        # Post to Twitter
+
         try:
-            logger.info("Attempting to post to Twitter")
             tweet_text = await self._post_to_twitter(message)
             self.rate_limiter.record_post()
-            
+
             status = self.rate_limiter.get_status()
-            logger.info(f"Successfully posted to Twitter. Remaining - Hourly: {status['hourly_remaining']}, Daily: {status['daily_remaining']}")
+            logger.info(f"Posted. Remaining - H:{status['hourly_remaining']}, D:{status['daily_remaining']}")
             await self._log(
                 f"✅ Posted to Twitter from {message.author.name}\n"
-                f"Tweet preview: {tweet_text[:100]}...\n"
-                f"Remaining - Hourly: {status['hourly_remaining']}, Daily: {status['daily_remaining']}"
-            )
-            
-            # React to the message to confirm posting
+                f"Tweet preview: {tweet_text[:100]}...")
             await message.add_reaction('🐦')
-            
+
         except tweepy.errors.Unauthorized as e:
-            logger.error(f"Twitter 401 Unauthorized error: {e}")
-            logger.error(f"Error response: {e.response}")
-            logger.error(f"Error API codes: {e.api_codes if hasattr(e, 'api_codes') else 'N/A'}")
-            logger.error(f"Error API messages: {e.api_messages if hasattr(e, 'api_messages') else 'N/A'}")
-            await self._log(f"❌ Twitter Authentication Error (401 Unauthorized): {str(e)}\nPlease verify your Twitter API credentials are correct and have write permissions.")
+            logger.error(f"Twitter 401: {e}")
+            await self._log(f"❌ Twitter Auth Error: {str(e)}")
             await message.add_reaction('❌')
         except tweepy.errors.Forbidden as e:
-            logger.error(f"Twitter 403 Forbidden error: {e}")
-            logger.error(f"Error response: {e.response}")
-            await self._log(f"❌ Twitter Forbidden Error (403): {str(e)}\nYour app may not have the correct permissions.")
+            logger.error(f"Twitter 403: {e}")
+            await self._log(f"❌ Twitter Forbidden: {str(e)}")
             await message.add_reaction('❌')
         except tweepy.errors.TooManyRequests as e:
-            logger.error(f"Twitter rate limit error: {e}")
-            await self._log(f"❌ Twitter Rate Limit Error: {str(e)}")
+            logger.error(f"Twitter rate limit: {e}")
+            await self._log(f"❌ Twitter Rate Limit: {str(e)}")
             await message.add_reaction('⚠️')
-        except tweepy.errors.TwitterServerError as e:
-            logger.error(f"Twitter server error: {e}")
-            await self._log(f"❌ Twitter Server Error: {str(e)}")
-            await message.add_reaction('❌')
         except Exception as e:
-            logger.error(f"Unexpected error posting to Twitter: {e}", exc_info=True)
-            await self._log(f"❌ Error posting to Twitter: {str(e)}")
+            logger.error(f"Error posting: {e}", exc_info=True)
+            await self._log(f"❌ Error: {str(e)}")
             await message.add_reaction('❌')
     
-    async def _upload_image_to_twitter(self, image_url: str) -> Optional[str]:
+    async def _post_to_twitter_mt(self, message: discord.Message, setup: ChannelSetup) -> str:
+        """Post message to Twitter using multi-tenant channel setup."""
+        TWITTER_CHAR_LIMIT = setup.char_limit
+
+        image_url = None
+        if message.embeds:
+            embed = message.embeds[0]
+            tweet_text = setup.embed_parser.create_tweet_from_embed(embed)
+            image_url = setup.embed_parser.get_embed_image_url(embed)
+        else:
+            tweet_text = setup.embed_parser.create_tweet_from_text(message.content)
+
+        if len(tweet_text) > TWITTER_CHAR_LIMIT:
+            tweet_text = tweet_text[:TWITTER_CHAR_LIMIT - 3] + "..."
+
+        # Upload image if present
+        media_id = None
+        if image_url:
+            media_id = await self._upload_image_to_twitter(image_url, setup.twitter_creds)
+
+        # Post with retry
+        max_retries = 3
+        retry_delay = 5
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+
+                kwargs = {"text": tweet_text}
+                if media_id:
+                    kwargs["media_ids"] = [media_id]
+
+                response = setup.twitter_client.create_tweet(**kwargs)
+                logger.info(f"Tweet posted. Response: {response}")
+                return tweet_text
+
+            except (ConnectionResetError, ConnectionError, RequestsConnectionError) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection error attempt {attempt + 1}: {e}")
+                    continue
+                raise
+            except Exception as e:
+                error_str = str(e).lower()
+                if 'connection' in error_str and ('reset' in error_str or 'aborted' in error_str):
+                    if attempt < max_retries - 1:
+                        continue
+                raise
+
+        return tweet_text
+
+    async def _upload_image_to_twitter(self, image_url: str, twitter_creds: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Download image from URL and upload to Twitter, returning media_id"""
         import tempfile
         import mimetypes
@@ -761,7 +999,7 @@ class DiscordTwitterBot(commands.Bot):
 
             logger.info(f"Uploading image to Twitter ({len(resp.content)} bytes, {content_type})")
             # Use tweepy v1 API for media upload (v2 doesn't support it directly)
-            tw = self.config.get('twitter', {})
+            tw = twitter_creds if twitter_creds else self.config.get('twitter', {})
             auth = tweepy.OAuth1UserHandler(
                 consumer_key=tw.get('api_key'),
                 consumer_secret=tw.get('api_secret'),
@@ -862,10 +1100,10 @@ class DiscordTwitterBot(commands.Bot):
         return tweet_text
     
     async def _log(self, message: str):
-        """Send log message to log channel"""
-        print(message)  # Always print to console
+        """Send log message to log channel (legacy single-tenant)"""
+        print(message)
         logger.info(f"Log message: {message}")
-        
+
         if self.log_channel_id:
             log_channel = self.get_channel(self.log_channel_id)
             if log_channel:
@@ -873,35 +1111,69 @@ class DiscordTwitterBot(commands.Bot):
                     await log_channel.send(message)
                 except Exception as e:
                     logger.error(f"Error sending to log channel: {e}")
+
+    async def _log_to_channel(self, channel_id: Optional[int], message: str):
+        """Send log message to a specific log channel."""
+        logger.info(message)
+        if channel_id:
+            log_channel = self.get_channel(channel_id)
+            if log_channel:
+                try:
+                    await log_channel.send(message)
+                except Exception as e:
+                    logger.error(f"Error sending to log channel {channel_id}: {e}")
     
     @commands.command(name='status')
     async def status(self, ctx):
         """Check bot status and rate limits"""
         logger.info(f"Status command invoked by {ctx.author.name}")
-        status = self.rate_limiter.get_status()
-        
-        embed = discord.Embed(title="Discord-Twitter Bot Status", color=0x1DA1F2)
-        embed.add_field(
-            name="Rate Limits",
-            value=f"Hourly: {status['hourly_remaining']} remaining\n"
-                  f"Daily: {status['daily_remaining']} remaining",
-            inline=False
-        )
-        embed.add_field(
-            name="Filters",
-            value=f"Enabled: {self.message_filter.enabled}\n"
-                  f"Require Embeds: {self.message_filter.require_embeds}",
-            inline=False
-        )
-        embed.add_field(
-            name="Configuration",
-            value=f"Channel: {self.monitored_channel_id}\n"
-                  f"Log Channel: {self.log_channel_id or 'Not set'}\n"
-                  f"Templates: {len(self.embed_parser.custom_templates or self.embed_parser.TWEET_TEMPLATES)}",
-            inline=False
-        )
-        
-        await ctx.send(embed=embed)
+
+        if self.multi_tenant:
+            # Show status for all channels in this guild
+            guild_channels = {ch_id: s for ch_id, s in self.channel_setups.items()
+                              if s.guild_id == ctx.guild.id}
+
+            if not guild_channels:
+                await ctx.send("No channels configured for this server. Set up channels at the web portal.")
+                return
+
+            embed_msg = discord.Embed(title="Discord-Twitter Bot Status", color=0x1DA1F2)
+            embed_msg.add_field(name="Mode", value="Multi-tenant", inline=False)
+            embed_msg.add_field(name="Monitored Channels", value=str(len(guild_channels)), inline=False)
+
+            for ch_id, setup in guild_channels.items():
+                rl_status = setup.rate_limiter.get_status()
+                embed_msg.add_field(
+                    name=f"<#{ch_id}>",
+                    value=f"Hourly: {rl_status['hourly_remaining']} left\n"
+                          f"Daily: {rl_status['daily_remaining']} left\n"
+                          f"Filters: {'On' if setup.message_filter.enabled else 'Off'}",
+                    inline=True
+                )
+
+            await ctx.send(embed=embed_msg)
+        else:
+            rl_status = self.rate_limiter.get_status()
+            embed_msg = discord.Embed(title="Discord-Twitter Bot Status", color=0x1DA1F2)
+            embed_msg.add_field(
+                name="Rate Limits",
+                value=f"Hourly: {rl_status['hourly_remaining']} remaining\n"
+                      f"Daily: {rl_status['daily_remaining']} remaining",
+                inline=False
+            )
+            embed_msg.add_field(
+                name="Filters",
+                value=f"Enabled: {self.message_filter.enabled}\n"
+                      f"Require Embeds: {self.message_filter.require_embeds}",
+                inline=False
+            )
+            embed_msg.add_field(
+                name="Configuration",
+                value=f"Channel: {self.monitored_channel_id}\n"
+                      f"Log Channel: {self.log_channel_id or 'Not set'}",
+                inline=False
+            )
+            await ctx.send(embed=embed_msg)
     
     @commands.command(name='test_filter')
     async def test_filter(self, ctx, *, test_message: str):
@@ -953,27 +1225,29 @@ class DiscordTwitterBot(commands.Bot):
     @commands.command(name='reload_config')
     @commands.has_permissions(administrator=True)
     async def reload_config(self, ctx):
-        """Reload configuration from file (Admin only)"""
+        """Reload configuration (Admin only). In multi-tenant mode, refreshes from Supabase."""
         logger.info(f"Reload config command invoked by {ctx.author.name}")
         try:
-            with open(self.config_path, 'r') as f:
-                file_config = json.load(f)
-            
-            # Update config (keeping environment variable credentials)
-            self.config['rate_limits'] = file_config.get('rate_limits', {'hourly': 50, 'daily': 100})
-            self.config['filters'] = file_config.get('filters', {})
-            self.config['embed_settings'] = file_config.get('embed_settings', {})
-            
-            # Reinitialize components
-            self.message_filter = MessageFilter(self.config.get('filters', {}))
-            self.rate_limiter = TwitterRateLimiter(
-                max_posts_per_hour=self.config.get('rate_limits', {}).get('hourly', 50),
-                max_posts_per_day=self.config.get('rate_limits', {}).get('daily', 100)
-            )
-            self.embed_parser = EmbedParser(self.config.get('embed_settings', {}))
-            
-            logger.info("Configuration reloaded successfully")
-            await ctx.send("✅ Configuration reloaded successfully!")
+            if self.multi_tenant:
+                self._load_configs_from_db()
+                guild_channels = sum(1 for s in self.channel_setups.values() if s.guild_id == ctx.guild.id)
+                await ctx.send(f"✅ Configuration reloaded from Supabase! {guild_channels} channel(s) active in this server.")
+            else:
+                with open(self.config_path, 'r') as f:
+                    file_config = json.load(f)
+
+                self.config['rate_limits'] = file_config.get('rate_limits', {'hourly': 50, 'daily': 100})
+                self.config['filters'] = file_config.get('filters', {})
+                self.config['embed_settings'] = file_config.get('embed_settings', {})
+
+                self.message_filter = MessageFilter(self.config.get('filters', {}))
+                self.rate_limiter = TwitterRateLimiter(
+                    max_posts_per_hour=self.config.get('rate_limits', {}).get('hourly', 50),
+                    max_posts_per_day=self.config.get('rate_limits', {}).get('daily', 100)
+                )
+                self.embed_parser = EmbedParser(self.config.get('embed_settings', {}))
+
+                await ctx.send("✅ Configuration reloaded successfully!")
         except Exception as e:
             logger.error(f"Error reloading config: {e}")
             await ctx.send(f"❌ Error reloading config: {str(e)}")
@@ -982,22 +1256,34 @@ class DiscordTwitterBot(commands.Bot):
 def main():
     """Main entry point"""
     logger.info("=" * 60)
-    logger.info("Starting Discord-Twitter Bot with Embed Support")
+    logger.info("Starting Discord-Twitter Bot")
     logger.info("=" * 60)
-    
-    # Check for required environment variables
-    required_env_vars = [
-        'DISCORD_TOKEN',
-        'DISCORD_CHANNEL_ID',
-        'TWITTER_API_KEY',
-        'TWITTER_API_SECRET',
-        'TWITTER_BEARER_TOKEN',
-        'TWITTER_ACCESS_TOKEN',
-        'TWITTER_ACCESS_TOKEN_SECRET'
-    ]
-    
+
+    # Determine mode: multi-tenant (Supabase) or single-tenant (env vars)
+    multi_tenant = MULTI_TENANT and os.getenv('SUPABASE_URL')
+
+    if multi_tenant:
+        logger.info("Mode: MULTI-TENANT (Supabase)")
+        required_env_vars = [
+            'DISCORD_TOKEN',
+            'SUPABASE_URL',
+            'SUPABASE_SERVICE_ROLE_KEY',
+            'ENCRYPTION_KEY',
+        ]
+    else:
+        logger.info("Mode: SINGLE-TENANT (legacy)")
+        required_env_vars = [
+            'DISCORD_TOKEN',
+            'DISCORD_CHANNEL_ID',
+            'TWITTER_API_KEY',
+            'TWITTER_API_SECRET',
+            'TWITTER_BEARER_TOKEN',
+            'TWITTER_ACCESS_TOKEN',
+            'TWITTER_ACCESS_TOKEN_SECRET'
+        ]
+
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    
+
     if missing_vars:
         logger.error("Missing required environment variables:")
         for var in missing_vars:
@@ -1007,44 +1293,34 @@ def main():
             print(f"  - {var}")
         print("\nPlease set these environment variables before running the bot.")
         return
-    
+
     logger.info("All required environment variables present")
-    
+
     # Initialize and run bot with retry logic for rate limits
     max_retries = 5
-    retry_delay = 60  # Start with 60 seconds
-    
+    retry_delay = 60
+
     for attempt in range(max_retries):
         try:
             bot = DiscordTwitterBot('config.json')
-            
-            # Get Discord token from environment
+
             discord_token = os.getenv('DISCORD_TOKEN')
-            
+
             logger.info("Starting bot...")
             bot.run(discord_token)
-            break  # If successful, exit the loop
-            
+            break
+
         except discord.errors.HTTPException as e:
-            if e.status == 429:  # Rate limit error
+            if e.status == 429:
                 if attempt < max_retries - 1:
-                    logger.warning("=" * 60)
                     logger.warning(f"Discord rate limit hit (attempt {attempt + 1}/{max_retries})")
                     logger.warning(f"Waiting {retry_delay} seconds before retry...")
-                    logger.warning("This happens when the bot is restarted too frequently")
-                    logger.warning("=" * 60)
-                    import time
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                    logger.info(f"Retrying connection (attempt {attempt + 2}/{max_retries})...")
+                    retry_delay *= 2
                 else:
-                    logger.error("=" * 60)
                     logger.error("Max retries reached. Discord is rate limiting the bot.")
-                    logger.error("Please wait 15-30 minutes before restarting.")
-                    logger.error("=" * 60)
                     raise
             else:
-                # Other HTTP error
                 logger.error(f"Discord HTTP error: {e}")
                 raise
         except Exception as e:
