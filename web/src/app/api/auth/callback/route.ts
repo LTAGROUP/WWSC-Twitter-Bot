@@ -15,8 +15,8 @@ export async function GET(req: NextRequest) {
 
     const supabase = createServerClient();
 
-    // Upsert user
-    const { data: user, error } = await supabase
+    // Step 1: upsert (write only)
+    const { error: upsertError } = await supabase
       .from('users')
       .upsert(
         {
@@ -26,13 +26,23 @@ export async function GET(req: NextRequest) {
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'discord_id' }
-      )
+      );
+
+    if (upsertError) {
+      console.error('Failed to upsert user:', upsertError);
+      return NextResponse.redirect(new URL(`/?error=db_error&detail=${upsertError.code}`, req.url));
+    }
+
+    // Step 2: fetch the user id
+    const { data: user, error: fetchError } = await supabase
+      .from('users')
       .select('id')
+      .eq('discord_id', discordUser.id)
       .single();
 
-    if (error || !user) {
-      console.error('Failed to upsert user:', error);
-      return NextResponse.redirect(new URL(`/?error=db_error&detail=${error?.code ?? 'no_user'}`, req.url));
+    if (fetchError || !user) {
+      console.error('Failed to fetch user after upsert:', fetchError);
+      return NextResponse.redirect(new URL(`/?error=db_error&detail=${fetchError?.code ?? 'no_user_after_upsert'}`, req.url));
     }
 
     await createSession({
