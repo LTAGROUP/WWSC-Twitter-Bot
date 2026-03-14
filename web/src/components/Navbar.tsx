@@ -28,7 +28,7 @@ export default function Navbar({ user }: NavbarProps) {
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center gap-8">
             <Link href="/" className="text-white font-bold text-lg">
-              WWSC Twitter Bot
+              Nexus Twitter Bot
             </Link>
             {navLinks.map((link) => (
               <Link

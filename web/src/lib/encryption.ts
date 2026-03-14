@@ -22,7 +22,7 @@ async function deriveKey(secret: string): Promise<CryptoKey> {
   return webcrypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
-      salt: encoder.encode('wwsc-twitter-bot-salt'),
+      salt: encoder.encode('nexus-twitter-bot-salt'),
       iterations: 100000,
       hash: 'SHA-256',
     },

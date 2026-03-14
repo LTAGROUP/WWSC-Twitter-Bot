@@ -75,6 +75,78 @@ export async function POST(req: NextRequest) {
   return NextResponse.json(data, { status: 201 });
 }
 
+export async function PUT(req: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const body = await req.json();
+  const {
+    id,
+    accountName,
+    twitterApiKey,
+    twitterApiSecret,
+    twitterBearerToken,
+    twitterAccessToken,
+    twitterAccessTokenSecret,
+  } = body;
+
+  if (!id || !accountName) {
+    return NextResponse.json({ error: 'id and accountName are required' }, { status: 400 });
+  }
+
+  const supabase = createServerClient();
+
+  const { data: existing } = await supabase
+    .from('twitter_accounts')
+    .select('owner_id')
+    .eq('id', id)
+    .single();
+
+  if (!existing || existing.owner_id !== session.userId) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+
+  const updates: Record<string, unknown> = {
+    account_name: accountName,
+    updated_at: new Date().toISOString(),
+  };
+
+  // Only update credentials if any are provided
+  if (twitterApiKey || twitterApiSecret || twitterBearerToken || twitterAccessToken || twitterAccessTokenSecret) {
+    if (!twitterApiKey || !twitterApiSecret || !twitterBearerToken || !twitterAccessToken || !twitterAccessTokenSecret) {
+      return NextResponse.json({ error: 'Provide all credential fields or none' }, { status: 400 });
+    }
+    const [encApiKey, encApiSecret, encBearer, encAccess, encAccessSecret] = await Promise.all([
+      encrypt(twitterApiKey),
+      encrypt(twitterApiSecret),
+      encrypt(twitterBearerToken),
+      encrypt(twitterAccessToken),
+      encrypt(twitterAccessTokenSecret),
+    ]);
+    updates.twitter_api_key = encApiKey;
+    updates.twitter_api_secret = encApiSecret;
+    updates.twitter_bearer_token = encBearer;
+    updates.twitter_access_token = encAccess;
+    updates.twitter_access_token_secret = encAccessSecret;
+    updates.is_valid = false; // Reset verification status when credentials change
+  }
+
+  const { data, error } = await supabase
+    .from('twitter_accounts')
+    .update(updates)
+    .eq('id', id)
+    .select('id, account_name, is_valid, last_verified_at, created_at')
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: 'Failed to update account' }, { status: 500 });
+  }
+
+  return NextResponse.json(data);
+}
+
 export async function DELETE(req: NextRequest) {
   const session = await getSession();
   if (!session) {

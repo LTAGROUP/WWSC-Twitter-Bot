@@ -481,6 +481,9 @@ class DiscordTwitterBot(commands.Bot):
         # Channel configs keyed by Discord channel_id (int)
         self.channel_setups: Dict[int, ChannelSetup] = {}
 
+        # Deduplication: track recently processed message IDs
+        self._processed_message_ids: set = set()
+
         # Legacy single-tenant fallback
         self.config = {}
         self.twitter_client = None
@@ -802,6 +805,13 @@ class DiscordTwitterBot(commands.Bot):
         if message.author == self.user:
             return
 
+        # Deduplicate: skip if this message was already handled
+        if message.id in self._processed_message_ids:
+            return
+        self._processed_message_ids.add(message.id)
+        if len(self._processed_message_ids) > 1000:
+            self._processed_message_ids.clear()
+
         # Process commands first (works in any channel)
         await self.process_commands(message)
 
@@ -960,13 +970,14 @@ class DiscordTwitterBot(commands.Bot):
                 if media_id:
                     kwargs["media_ids"] = [media_id]
 
-                response = setup.twitter_client.create_tweet(**kwargs)
+                response = setup.twitter_client.create_tweet(user_auth=True, **kwargs)
                 logger.info(f"Tweet posted. Response: {response}")
                 return tweet_text
 
-            except (ConnectionResetError, ConnectionError, RequestsConnectionError) as e:
+            except (ConnectionResetError, ConnectionError, RequestsConnectionError, tweepy.errors.TwitterServerError) as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Connection error attempt {attempt + 1}: {e}")
+                    body = getattr(getattr(e, 'response', None), 'text', '') or ''
+                    logger.warning(f"Transient error attempt {attempt + 1}/{max_retries}: {e} | body: {body[:300]}")
                     continue
                 raise
             except Exception as e:

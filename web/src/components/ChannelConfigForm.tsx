@@ -77,6 +77,12 @@ export default function ChannelConfigForm({
     setLoading(true);
     setError('');
 
+    if (!config.twitterAccountId) {
+      setError('Please select a Twitter account');
+      setLoading(false);
+      return;
+    }
+
     const parseList = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
     try {
@@ -143,7 +149,7 @@ export default function ChannelConfigForm({
         </label>
 
         <div>
-          <label className="block text-sm text-gray-300 mb-1">Twitter Account</label>
+          <label className="block text-sm text-gray-300 mb-1">Twitter Account *</label>
           <select
             value={config.twitterAccountId}
             onChange={(e) => setConfig({ ...config, twitterAccountId: e.target.value })}

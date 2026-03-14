@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "WWSC Twitter Bot",
+  title: "Nexus Twitter Bot",
   description: "Multi-user Discord to Twitter auto-poster management portal",
 };
 

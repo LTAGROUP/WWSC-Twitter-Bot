@@ -1,4 +1,4 @@
--- WWSC Twitter Bot - Multi-User Database Schema
+-- Nexus Twitter Bot - Multi-User Database Schema
 -- Run this in Supabase SQL Editor to set up all tables
 
 -- Users authenticated via Discord OAuth2
@@ -116,6 +116,10 @@ CREATE POLICY "Users can read own profile"
 CREATE POLICY "Users can update own profile"
   ON users FOR UPDATE
   USING (discord_id = current_setting('app.current_user_discord_id', true));
+
+CREATE POLICY "Users can insert own profile"
+  ON users FOR INSERT
+  WITH CHECK (discord_id = current_setting('app.current_user_discord_id', true));
 
 CREATE POLICY "Users can read own guilds"
   ON guilds FOR SELECT

@@ -21,7 +21,7 @@ def _get_key() -> bytes:
     key = hashlib.pbkdf2_hmac(
         'sha256',
         secret.encode('utf-8'),
-        b'wwsc-twitter-bot-salt',
+        b'nexus-twitter-bot-salt',
         100000,
         dklen=32
     )
