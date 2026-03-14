@@ -36,29 +36,45 @@ export default function ServerDetailPage() {
   const [twitterAccounts, setTwitterAccounts] = useState<TwitterAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
+  const [user, setUser] = useState<{ discordUsername: string; discordAvatar: string | null; discordId: string } | null>(null);
+  const [guildLogChannel, setGuildLogChannel] = useState('');
+  const [savingLogChannel, setSavingLogChannel] = useState(false);
 
   const fetchData = async () => {
     try {
-      const [channelsRes, configsRes, accountsRes] = await Promise.all([
-        fetch(`/api/guilds?action=channels&guildId=${guildId}`),
+      const [configsRes, accountsRes, guildRes, meRes] = await Promise.all([
         fetch(`/api/channel-configs?guildId=${guildId}`),
         fetch('/api/twitter-accounts'),
+        fetch(`/api/guilds?action=guild&guildId=${guildId}`),
+        fetch('/api/auth/me'),
       ]);
 
-      // Channels come from Discord API via a separate endpoint
-      // For now, we'll show configured channels and allow adding new ones
-      if (configsRes.ok) {
-        const configsData = await configsRes.json();
-        setConfigs(configsData);
+      if (configsRes.ok) setConfigs(await configsRes.json());
+      if (accountsRes.ok) setTwitterAccounts(await accountsRes.json());
+      if (guildRes.ok) {
+        const guildData = await guildRes.json();
+        setGuildLogChannel(guildData.log_channel_id || '');
       }
-      if (accountsRes.ok) {
-        const accountsData = await accountsRes.json();
-        setTwitterAccounts(accountsData);
-      }
+      if (meRes.ok) setUser(await meRes.json());
     } catch (err) {
       console.error('Failed to fetch data:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveLogChannel = async () => {
+    setSavingLogChannel(true);
+    try {
+      await fetch('/api/guilds', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guildId, logChannelId: guildLogChannel }),
+      });
+    } catch (err) {
+      console.error('Failed to save log channel:', err);
+    } finally {
+      setSavingLogChannel(false);
     }
   };
 
@@ -70,7 +86,7 @@ export default function ServerDetailPage() {
 
   return (
     <>
-      <Navbar user={null} />
+      <Navbar user={user} />
       <main className="max-w-4xl mx-auto px-4 py-8">
         <div className="flex items-center gap-4 mb-8">
           <Link href="/dashboard" className="text-gray-400 hover:text-white">
@@ -83,6 +99,33 @@ export default function ServerDetailPage() {
           <div className="text-gray-400 text-center py-16">Loading...</div>
         ) : (
           <>
+            {/* Server Settings */}
+            <section className="mb-8">
+              <h2 className="text-lg font-semibold mb-4">Server Settings</h2>
+              <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                <label className="block text-sm text-gray-300 mb-1">Log Channel ID</label>
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    value={guildLogChannel}
+                    onChange={(e) => setGuildLogChannel(e.target.value)}
+                    placeholder="Enter Discord channel ID for bot logs"
+                    className="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+                  />
+                  <button
+                    onClick={saveLogChannel}
+                    disabled={savingLogChannel}
+                    className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {savingLogChannel ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+                <p className="text-gray-500 text-xs mt-2">
+                  Right-click a channel in Discord → Copy Channel ID (requires Developer Mode). The bot will send status messages here.
+                </p>
+              </div>
+            </section>
+
             {/* Configured Channels */}
             <section className="mb-8">
               <h2 className="text-lg font-semibold mb-4">Monitored Channels</h2>

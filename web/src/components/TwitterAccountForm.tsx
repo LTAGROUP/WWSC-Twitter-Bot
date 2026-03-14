@@ -5,13 +5,22 @@ import { useState } from 'react';
 interface TwitterAccountFormProps {
   onSuccess: () => void;
   onCancel: () => void;
+  editMode?: boolean;
+  accountId?: string;
+  initialAccountName?: string;
 }
 
-export default function TwitterAccountForm({ onSuccess, onCancel }: TwitterAccountFormProps) {
+export default function TwitterAccountForm({
+  onSuccess,
+  onCancel,
+  editMode = false,
+  accountId,
+  initialAccountName = '',
+}: TwitterAccountFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [form, setForm] = useState({
-    accountName: '',
+    accountName: initialAccountName,
     twitterApiKey: '',
     twitterApiSecret: '',
     twitterBearerToken: '',
@@ -26,14 +35,14 @@ export default function TwitterAccountForm({ onSuccess, onCancel }: TwitterAccou
 
     try {
       const res = await fetch('/api/twitter-accounts', {
-        method: 'POST',
+        method: editMode ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(editMode ? { id: accountId, ...form } : form),
       });
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || 'Failed to add account');
+        throw new Error(data.error || 'Failed to save account');
       }
 
       onSuccess();
@@ -44,13 +53,12 @@ export default function TwitterAccountForm({ onSuccess, onCancel }: TwitterAccou
     }
   };
 
-  const fields = [
-    { key: 'accountName', label: 'Account Display Name', placeholder: 'e.g. My Store Bot' },
-    { key: 'twitterApiKey', label: 'API Key (Consumer Key)', placeholder: 'Enter API Key' },
-    { key: 'twitterApiSecret', label: 'API Secret (Consumer Secret)', placeholder: 'Enter API Secret' },
-    { key: 'twitterBearerToken', label: 'Bearer Token', placeholder: 'Enter Bearer Token' },
-    { key: 'twitterAccessToken', label: 'Access Token', placeholder: 'Enter Access Token' },
-    { key: 'twitterAccessTokenSecret', label: 'Access Token Secret', placeholder: 'Enter Access Token Secret' },
+  const credentialFields = [
+    { key: 'twitterApiKey', label: 'API Key (Consumer Key)', placeholder: editMode ? 'Leave blank to keep existing' : 'Enter API Key' },
+    { key: 'twitterApiSecret', label: 'API Secret (Consumer Secret)', placeholder: editMode ? 'Leave blank to keep existing' : 'Enter API Secret' },
+    { key: 'twitterBearerToken', label: 'Bearer Token', placeholder: editMode ? 'Leave blank to keep existing' : 'Enter Bearer Token' },
+    { key: 'twitterAccessToken', label: 'Access Token', placeholder: editMode ? 'Leave blank to keep existing' : 'Enter Access Token' },
+    { key: 'twitterAccessTokenSecret', label: 'Access Token Secret', placeholder: editMode ? 'Leave blank to keep existing' : 'Enter Access Token Secret' },
   ];
 
   return (
@@ -61,15 +69,31 @@ export default function TwitterAccountForm({ onSuccess, onCancel }: TwitterAccou
         </div>
       )}
 
-      {fields.map(({ key, label, placeholder }) => (
+      <div>
+        <label className="block text-sm text-gray-300 mb-1">Account Display Name</label>
+        <input
+          type="text"
+          value={form.accountName}
+          onChange={(e) => setForm({ ...form, accountName: e.target.value })}
+          placeholder="e.g. My Store Bot"
+          required
+          className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+        />
+      </div>
+
+      {editMode && (
+        <p className="text-gray-500 text-xs">Leave all credential fields blank to keep existing credentials.</p>
+      )}
+
+      {credentialFields.map(({ key, label, placeholder }) => (
         <div key={key}>
           <label className="block text-sm text-gray-300 mb-1">{label}</label>
           <input
-            type={key === 'accountName' ? 'text' : 'password'}
+            type="password"
             value={form[key as keyof typeof form]}
             onChange={(e) => setForm({ ...form, [key]: e.target.value })}
             placeholder={placeholder}
-            required
+            required={!editMode}
             className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
           />
         </div>
@@ -81,7 +105,7 @@ export default function TwitterAccountForm({ onSuccess, onCancel }: TwitterAccou
           disabled={loading}
           className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? 'Adding...' : 'Add Account'}
+          {loading ? 'Saving...' : editMode ? 'Save Changes' : 'Add Account'}
         </button>
         <button
           type="button"

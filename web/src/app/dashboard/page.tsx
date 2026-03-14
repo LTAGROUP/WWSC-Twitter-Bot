@@ -19,13 +19,17 @@ export default function DashboardPage() {
 
   const fetchGuilds = async () => {
     try {
-      const res = await fetch('/api/guilds');
-      if (res.status === 401) {
+      const [guildsRes, meRes] = await Promise.all([
+        fetch('/api/guilds'),
+        fetch('/api/auth/me'),
+      ]);
+      if (guildsRes.status === 401) {
         window.location.href = '/api/auth/login';
         return;
       }
-      const data = await res.json();
+      const data = await guildsRes.json();
       setGuilds(data);
+      if (meRes.ok) setUser(await meRes.json());
     } catch (err) {
       console.error('Failed to fetch guilds:', err);
     } finally {

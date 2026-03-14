@@ -18,6 +18,8 @@ export default function TwitterAccountsPage() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
+  const [user, setUser] = useState<{ discordUsername: string; discordAvatar: string | null; discordId: string } | null>(null);
+  const [editingAccount, setEditingAccount] = useState<TwitterAccount | null>(null);
 
   const fetchAccounts = async () => {
     try {
@@ -34,6 +36,7 @@ export default function TwitterAccountsPage() {
 
   useEffect(() => {
     fetchAccounts();
+    fetch('/api/auth/me').then((r) => r.ok && r.json()).then((d) => d && setUser(d));
   }, []);
 
   const verifyAccount = async (accountId: string) => {
@@ -75,7 +78,7 @@ export default function TwitterAccountsPage() {
 
   return (
     <>
-      <Navbar user={null} />
+      <Navbar user={user} />
       <main className="max-w-4xl mx-auto px-4 py-8">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
@@ -84,7 +87,7 @@ export default function TwitterAccountsPage() {
             </Link>
             <h1 className="text-2xl font-bold">Twitter Accounts</h1>
           </div>
-          {!showForm && (
+          {!showForm && !editingAccount && (
             <button
               onClick={() => setShowForm(true)}
               className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700"
@@ -103,6 +106,22 @@ export default function TwitterAccountsPage() {
                 fetchAccounts();
               }}
               onCancel={() => setShowForm(false)}
+            />
+          </div>
+        )}
+
+        {editingAccount && (
+          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
+            <h2 className="text-lg font-semibold mb-4">Edit: {editingAccount.account_name}</h2>
+            <TwitterAccountForm
+              editMode
+              accountId={editingAccount.id}
+              initialAccountName={editingAccount.account_name}
+              onSuccess={() => {
+                setEditingAccount(null);
+                fetchAccounts();
+              }}
+              onCancel={() => setEditingAccount(null)}
             />
           </div>
         )}
@@ -155,6 +174,12 @@ export default function TwitterAccountsPage() {
                     className="bg-gray-700 text-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-600 disabled:opacity-50"
                   >
                     {verifying === account.id ? 'Verifying...' : 'Verify'}
+                  </button>
+                  <button
+                    onClick={() => { setEditingAccount(account); setShowForm(false); }}
+                    className="bg-gray-700 text-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-600"
+                  >
+                    Edit
                   </button>
                   <button
                     onClick={() => deleteAccount(account.id)}
