@@ -964,9 +964,9 @@ class DiscordTwitterBot(commands.Bot):
                 logger.info(f"Tweet posted. Response: {response}")
                 return tweet_text
 
-            except (ConnectionResetError, ConnectionError, RequestsConnectionError) as e:
+            except (ConnectionResetError, ConnectionError, RequestsConnectionError, tweepy.errors.TwitterServerError) as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Connection error attempt {attempt + 1}: {e}")
+                    logger.warning(f"Transient error attempt {attempt + 1}/{max_retries}: {e}")
                     continue
                 raise
             except Exception as e:
