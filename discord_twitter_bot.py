@@ -960,7 +960,7 @@ class DiscordTwitterBot(commands.Bot):
                 if media_id:
                     kwargs["media_ids"] = [media_id]
 
-                response = setup.twitter_client.create_tweet(**kwargs)
+                response = setup.twitter_client.create_tweet(user_auth=True, **kwargs)
                 logger.info(f"Tweet posted. Response: {response}")
                 return tweet_text
 
