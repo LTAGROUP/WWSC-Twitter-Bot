@@ -609,6 +609,31 @@ class DiscordTwitterBot(commands.Bot):
                     access_token_secret=creds['access_token_secret']
                 )
 
+                # Check token permission level via v1.1 verify_credentials
+                account_name = twitter_acc.get('account_name', 'unknown')
+                try:
+                    auth = tweepy.OAuth1UserHandler(
+                        consumer_key=creds['api_key'],
+                        consumer_secret=creds['api_secret'],
+                        access_token=creds['access_token'],
+                        access_token_secret=creds['access_token_secret']
+                    )
+                    api_v1 = tweepy.API(auth)
+                    api_v1.verify_credentials()
+                    perm_level = getattr(api_v1.last_response, 'headers', {}).get('x-app-permission-level', 'unknown')
+                    if 'write' not in perm_level:
+                        logger.error(
+                            f"Twitter account '{account_name}' has permission level '{perm_level}' — "
+                            f"write access is required to post tweets. "
+                            f"Regenerate access tokens AFTER enabling 'Read and Write' in the Twitter Developer Portal."
+                        )
+                    else:
+                        logger.info(f"Twitter account '{account_name}' permission level: {perm_level}")
+                except tweepy.errors.TooManyRequests:
+                    logger.warning(f"Rate limited checking permissions for '{account_name}', skipping check")
+                except Exception as perm_err:
+                    logger.warning(f"Could not verify permission level for '{account_name}': {perm_err}")
+
                 # Build filter config from DB fields
                 filter_config = {
                     'enabled': cfg.get('filter_enabled', True),

@@ -95,6 +95,8 @@ export async function POST(req: NextRequest) {
     }
 
     const userData = await res.json();
+    const permissionLevel = res.headers.get('x-app-permission-level') || 'unknown';
+    const hasWriteAccess = permissionLevel.includes('write');
 
     await supabase
       .from('twitter_accounts')
@@ -103,7 +105,15 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       valid: true,
+      writeAccess: hasWriteAccess,
+      permissionLevel,
       twitterUser: { username: userData.screen_name },
+      ...(!hasWriteAccess && {
+        warning:
+          'Your access tokens only have read permission. ' +
+          'Go to the Twitter Developer Portal, ensure your app has "Read and Write" permissions, ' +
+          'then regenerate your Access Token and Access Token Secret.',
+      }),
     });
   } catch (err) {
     console.error('Twitter verification error:', err);
