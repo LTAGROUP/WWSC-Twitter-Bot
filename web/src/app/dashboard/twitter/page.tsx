@@ -49,7 +49,15 @@ export default function TwitterAccountsPage() {
       });
       const data = await res.json();
       if (data.valid) {
-        alert(`Verified! Twitter user: @${data.twitterUser?.username || 'unknown'}`);
+        if (data.writeAccess === false) {
+          alert(
+            `Credentials valid (@${data.twitterUser?.username || 'unknown'}), but tokens only have "${data.permissionLevel}" permission.\n\n` +
+            `Posting tweets requires "read-write" access.\n\n` +
+            `To fix: go to the Twitter Developer Portal, ensure your app has "Read and Write" permissions, then REGENERATE your Access Token and Access Token Secret. Old tokens keep old permissions.`
+          );
+        } else {
+          alert(`Verified! Twitter user: @${data.twitterUser?.username || 'unknown'} (${data.permissionLevel})`);
+        }
       } else {
         alert(`Verification failed: ${data.error}`);
       }
