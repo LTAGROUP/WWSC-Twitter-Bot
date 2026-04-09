@@ -243,7 +243,7 @@ class EmbedParser:
         if not link:
             logger.warning("No link found in embed")
 
-        # Build tweet in order: Name, QTY, Limit, Price, Link, #ad
+        # Build tweet in order: Name, QTY, Limit, Price, Link, hashtags
         lines = [name]
         if qty_line:
             lines.append(qty_line)
@@ -253,25 +253,35 @@ class EmbedParser:
             lines.append(price_line)
         if link:
             lines.append(link)
-        lines.append("#ad")
+
+        # Add configured hashtags, or fall back to just #ad
+        if self.include_hashtags and self.default_hashtags:
+            hashtag_str = " ".join(
+                tag if tag.startswith("#") else f"#{tag}"
+                for tag in self.default_hashtags
+            )
+            lines.append(hashtag_str)
+        else:
+            lines.append("#ad")
 
         tweet = "\n".join(lines)
 
-        # Truncate to 280 chars if needed, always preserving link and #ad at the end
+        # Truncate to 280 chars if needed, always preserving link and hashtags at the end
+        hashtags_line = lines[-1]  # The hashtags we appended last
         if len(tweet) > 280:
             if link:
-                # Reserve space for \nlink\n#ad
-                suffix = "\n" + link + "\n#ad"
+                # Reserve space for \nlink\nhashtags
+                suffix = "\n" + link + "\n" + hashtags_line
                 max_body = 280 - len(suffix)
-                body = "\n".join(lines[:-2])  # Everything before link and #ad
+                body = "\n".join(lines[:-2])  # Everything before link and hashtags
                 if len(body) > max_body:
                     body = body[:max_body - 1] + "…"
                 tweet = body + suffix
             else:
-                # Reserve space for \n#ad
-                suffix = "\n#ad"
+                # Reserve space for \nhashtags
+                suffix = "\n" + hashtags_line
                 max_body = 280 - len(suffix)
-                body = "\n".join(lines[:-1])  # Everything before #ad
+                body = "\n".join(lines[:-1])  # Everything before hashtags
                 if len(body) > max_body:
                     body = body[:max_body - 1] + "…"
                 tweet = body + suffix
