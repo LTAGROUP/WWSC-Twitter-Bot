@@ -448,6 +448,25 @@ class MessageFilter:
         return True, "Passed all filters"
 
 
+def _extract_tweepy_error_details(e: Exception) -> str:
+    """Extract detailed error info from a tweepy exception for logging."""
+    details = []
+    if hasattr(e, 'response') and e.response is not None:
+        try:
+            details.append(f"response_body={e.response.text}")
+        except Exception:
+            pass
+        try:
+            details.append(f"url={e.response.url}")
+        except Exception:
+            pass
+    if hasattr(e, 'api_codes') and e.api_codes:
+        details.append(f"api_codes={e.api_codes}")
+    if hasattr(e, 'api_messages') and e.api_messages:
+        details.append(f"api_messages={e.api_messages}")
+    return ' | '.join(details) if details else 'no additional details'
+
+
 @dataclass
 class ChannelSetup:
     """Configuration for a single monitored channel."""
@@ -459,6 +478,7 @@ class ChannelSetup:
     rate_limiter: TwitterRateLimiter
     message_filter: MessageFilter
     embed_parser: EmbedParser
+    twitter_account_name: str = 'unknown'
     char_limit: int = 280
     log_channel_id: Optional[int] = None
 
@@ -623,6 +643,7 @@ class DiscordTwitterBot(commands.Bot):
                     rate_limiter=rate_limiter,
                     message_filter=MessageFilter(filter_config),
                     embed_parser=EmbedParser(embed_settings),
+                    twitter_account_name=twitter_acc.get('account_name', 'unknown'),
                     char_limit=cfg.get('twitter_char_limit', 280),
                     log_channel_id=int(log_ch) if log_ch else None,
                 )
@@ -869,25 +890,53 @@ class DiscordTwitterBot(commands.Bot):
             await message.add_reaction('🐦')
 
         except tweepy.errors.Unauthorized as e:
-            logger.error(f"[{setup.config_id[:8]}] Twitter 401: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"[{setup.config_id[:8]}] Twitter 401 | "
+                f"twitter_account={setup.twitter_account_name} | "
+                f"discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={setup.channel_id} | guild={setup.guild_id} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             if self.db:
                 self.db.log_tweet(setup.config_id, str(e), status='failed',
                     discord_message_id=str(message.id), error_message=str(e))
             await message.add_reaction('❌')
         except tweepy.errors.Forbidden as e:
-            logger.error(f"[{setup.config_id[:8]}] Twitter 403: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"[{setup.config_id[:8]}] Twitter 403 | "
+                f"twitter_account={setup.twitter_account_name} | "
+                f"discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={setup.channel_id} | guild={setup.guild_id} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             if self.db:
                 self.db.log_tweet(setup.config_id, str(e), status='failed',
                     discord_message_id=str(message.id), error_message=str(e))
             await message.add_reaction('❌')
         except tweepy.errors.TooManyRequests as e:
-            logger.error(f"[{setup.config_id[:8]}] Twitter rate limit: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"[{setup.config_id[:8]}] Twitter rate limit | "
+                f"twitter_account={setup.twitter_account_name} | "
+                f"discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={setup.channel_id} | guild={setup.guild_id} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             if self.db:
                 self.db.log_tweet(setup.config_id, str(e), status='rate_limited',
                     discord_message_id=str(message.id), error_message=str(e))
             await message.add_reaction('⚠️')
         except Exception as e:
-            logger.error(f"[{setup.config_id[:8]}] Error posting: {e}", exc_info=True)
+            logger.error(
+                f"[{setup.config_id[:8]}] Error posting | "
+                f"twitter_account={setup.twitter_account_name} | "
+                f"discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={setup.channel_id} | guild={setup.guild_id} | "
+                f"operation=create_tweet | error={e}",
+                exc_info=True
+            )
             if self.db:
                 self.db.log_tweet(setup.config_id, str(e), status='failed',
                     discord_message_id=str(message.id), error_message=str(e))
@@ -921,19 +970,39 @@ class DiscordTwitterBot(commands.Bot):
             await message.add_reaction('🐦')
 
         except tweepy.errors.Unauthorized as e:
-            logger.error(f"Twitter 401: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"Twitter 401 | discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={message.channel.id} | guild={getattr(message.guild, 'id', 'N/A')} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             await self._log(f"❌ Twitter Auth Error: {str(e)}")
             await message.add_reaction('❌')
         except tweepy.errors.Forbidden as e:
-            logger.error(f"Twitter 403: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"Twitter 403 | discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={message.channel.id} | guild={getattr(message.guild, 'id', 'N/A')} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             await self._log(f"❌ Twitter Forbidden: {str(e)}")
             await message.add_reaction('❌')
         except tweepy.errors.TooManyRequests as e:
-            logger.error(f"Twitter rate limit: {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.error(
+                f"Twitter rate limit | discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={message.channel.id} | guild={getattr(message.guild, 'id', 'N/A')} | "
+                f"operation=create_tweet | error={e} | {err_details}"
+            )
             await self._log(f"❌ Twitter Rate Limit: {str(e)}")
             await message.add_reaction('⚠️')
         except Exception as e:
-            logger.error(f"Error posting: {e}", exc_info=True)
+            logger.error(
+                f"Error posting | discord_user={message.author.name} (id={message.author.id}) | "
+                f"channel={message.channel.id} | guild={getattr(message.guild, 'id', 'N/A')} | "
+                f"operation=create_tweet | error={e}",
+                exc_info=True
+            )
             await self._log(f"❌ Error: {str(e)}")
             await message.add_reaction('❌')
     
@@ -1027,7 +1096,12 @@ class DiscordTwitterBot(commands.Bot):
             return media_id
 
         except Exception as e:
-            logger.warning(f"Failed to upload image (tweet will post without it): {e}")
+            err_details = _extract_tweepy_error_details(e)
+            logger.warning(
+                f"Failed to upload image (tweet will post without it) | "
+                f"image_url={image_url} | operation=media_upload | "
+                f"error={e} | {err_details}"
+            )
             return None
 
     async def _post_to_twitter(self, message: discord.Message) -> str:
