@@ -6,6 +6,7 @@ A Discord bot that automatically posts messages from a specific Discord channel 
 
 - ✅ **Automatic posting** from Discord to Twitter
 - 🎨 **Discord embed support** - Converts embeds to natural-sounding tweets
+- 🖼️ **Image attachment support** - Forwards manually uploaded Discord images to Twitter
 - 🛍️ **Restock alert formatting** - Automatically formats product info (name, price, stock, limit, etc.)
 - 🎯 **Advanced filtering system** with multiple criteria
 - ⏱️ **Rate limiting** to stay within Twitter API limits
@@ -26,6 +27,10 @@ The bot now automatically detects Discord embeds (like restock alerts) and conve
 - **Size** (appended to product name)
 - **Retailer** (added to link when space permits)
 - **SKU** (for reference)
+
+## Image Attachments
+
+When a user manually uploads one or more images to the monitored Discord channel, the bot forwards the images to Twitter along with the message caption. Up to four images are included in a single post, matching Twitter's image limit. If the message has no caption, the bot creates a media-only post when supported by the Twitter API. Non-image attachments are ignored.
 
 ### Example Tweet Outputs
 
@@ -164,7 +169,7 @@ Configure what messages get posted to Twitter:
 - Default: `true`
 
 #### `min_length` / `max_length` (integer)
-- For text-only messages (embeds bypass this)
+- For text-only messages (embeds and image attachments bypass this)
 - Default: `10` / `280`
 
 #### `required_keywords` (array of strings)

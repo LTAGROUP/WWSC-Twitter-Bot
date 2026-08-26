@@ -379,7 +379,13 @@ class MessageFilter:
         # Log if message has embeds
         if message.embeds:
             logger.debug(f"Message has {len(message.embeds)} embed(s)")
-        
+
+        # Manually uploaded images arrive as Discord attachments, not embeds.
+        has_image_attachment = any(
+            _is_image_attachment(attachment)
+            for attachment in getattr(message, "attachments", []) or []
+        )
+
         if not self.enabled:
             logger.debug("Filtering disabled")
             return False, "Filtering disabled"
@@ -418,8 +424,8 @@ class MessageFilter:
                 for field in embed.fields:
                     content_to_check += " " + field.name + " " + field.value
         
-        # Check message length (only for text messages, embeds handled separately)
-        if not message.embeds:
+        # Check message length for text-only messages.
+        if not message.embeds and not has_image_attachment:
             content_length = len(message.content)
             if content_length < self.min_length:
                 logger.debug(f"Message rejected: too short ({content_length} < {self.min_length})")
@@ -475,6 +481,47 @@ def _extract_tweepy_error_details(e: Exception) -> str:
     if hasattr(e, 'api_messages') and e.api_messages:
         details.append(f"api_messages={e.api_messages}")
     return ' | '.join(details) if details else 'no additional details'
+
+
+TWITTER_MAX_IMAGES = 4
+IMAGE_ATTACHMENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+
+def _is_image_attachment(attachment) -> bool:
+    """Return True when a Discord attachment is an image."""
+    content_type = (getattr(attachment, "content_type", None) or "").lower()
+    if content_type.startswith("image/"):
+        return True
+
+    filename = getattr(attachment, "filename", None) or ""
+    extension = os.path.splitext(filename)[1].lower()
+    return extension in IMAGE_ATTACHMENT_EXTENSIONS
+
+
+def _get_image_urls_for_message(
+    message: discord.Message,
+    embed_image_url: Optional[str] = None
+) -> List[str]:
+    """Return direct image attachment URLs, falling back to an embed image."""
+    attachment_urls = []
+    for attachment in getattr(message, "attachments", []) or []:
+        if not _is_image_attachment(attachment):
+            continue
+
+        url = getattr(attachment, "url", None)
+        if url and url not in attachment_urls:
+            attachment_urls.append(url)
+
+    if attachment_urls:
+        if len(attachment_urls) > TWITTER_MAX_IMAGES:
+            logger.warning(
+                f"Message has {len(attachment_urls)} image attachments; "
+                f"Twitter supports {TWITTER_MAX_IMAGES} images per post. "
+                f"Using the first {TWITTER_MAX_IMAGES}."
+            )
+        return attachment_urls[:TWITTER_MAX_IMAGES]
+
+    return [embed_image_url] if embed_image_url else []
 
 
 @dataclass
@@ -1043,23 +1090,25 @@ class DiscordTwitterBot(commands.Bot):
     
     async def _post_to_twitter_mt(self, message: discord.Message, setup: ChannelSetup) -> str:
         """Post message to Twitter using multi-tenant channel setup."""
-        TWITTER_CHAR_LIMIT = setup.char_limit
+        twitter_char_limit = setup.char_limit
 
-        image_url = None
+        embed_image_url = None
         if message.embeds:
             embed = message.embeds[0]
             tweet_text = setup.embed_parser.create_tweet_from_embed(embed)
-            image_url = setup.embed_parser.get_embed_image_url(embed)
+            embed_image_url = setup.embed_parser.get_embed_image_url(embed)
         else:
             tweet_text = setup.embed_parser.create_tweet_from_text(message.content)
 
-        if len(tweet_text) > TWITTER_CHAR_LIMIT:
-            tweet_text = tweet_text[:TWITTER_CHAR_LIMIT - 3] + "..."
+        if len(tweet_text) > twitter_char_limit:
+            tweet_text = tweet_text[:twitter_char_limit - 3] + "..."
 
-        # Upload image if present
-        media_id = None
-        if image_url:
-            media_id = await self._upload_image_to_twitter(image_url, setup.twitter_creds)
+        image_urls = _get_image_urls_for_message(message, embed_image_url)
+        if image_urls:
+            logger.info(
+                f"[{setup.config_id[:8]}] Found {len(image_urls)} image(s) to upload"
+            )
+        media_ids = await self._upload_images_to_twitter(image_urls, setup.twitter_creds)
 
         # Post with retry
         max_retries = 3
@@ -1070,9 +1119,12 @@ class DiscordTwitterBot(commands.Bot):
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2
 
-                kwargs = {"text": tweet_text}
-                if media_id:
-                    kwargs["media_ids"] = [media_id]
+                kwargs = {}
+                # Twitter supports media-only posts, so omit empty text when an image uploaded.
+                if tweet_text or not media_ids:
+                    kwargs["text"] = tweet_text
+                if media_ids:
+                    kwargs["media_ids"] = media_ids
 
                 response = setup.twitter_client.create_tweet(user_auth=True, **kwargs)
                 logger.info(f"Tweet posted. Response: {response}")
@@ -1092,6 +1144,19 @@ class DiscordTwitterBot(commands.Bot):
                 raise
 
         return tweet_text
+
+    async def _upload_images_to_twitter(
+        self,
+        image_urls: List[str],
+        twitter_creds: Optional[Dict[str, str]] = None
+    ) -> List[str]:
+        """Upload image URLs to Twitter and return the media IDs that succeeded."""
+        media_ids = []
+        for image_url in image_urls:
+            media_id = await self._upload_image_to_twitter(image_url, twitter_creds)
+            if media_id:
+                media_ids.append(media_id)
+        return media_ids
 
     async def _upload_image_to_twitter(self, image_url: str, twitter_creds: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Download image from URL and upload to Twitter, returning media_id"""
@@ -1141,38 +1206,37 @@ class DiscordTwitterBot(commands.Bot):
 
     async def _post_to_twitter(self, message: discord.Message) -> str:
         """Post message content to Twitter, handling both embeds and text"""
-        
+
         # Twitter's hard character limit - read from config, defaults to 280
         # Set to 25000 in config if you have Twitter Blue/X Premium
-        TWITTER_CHAR_LIMIT = self.config.get('twitter_char_limit', 280)
-        
-        image_url = None
+        twitter_char_limit = self.config.get('twitter_char_limit', 280)
+
+        embed_image_url = None
         if message.embeds:
             logger.info(f"Processing message with {len(message.embeds)} embed(s)")
             embed = message.embeds[0]
             tweet_text = self.embed_parser.create_tweet_from_embed(embed)
-            image_url = self.embed_parser.get_embed_image_url(embed)
+            embed_image_url = self.embed_parser.get_embed_image_url(embed)
         else:
             logger.info("Processing text message")
             tweet_text = self.embed_parser.create_tweet_from_text(message.content)
-        
+
         # Truncate to Twitter's character limit if needed
-        if len(tweet_text) > TWITTER_CHAR_LIMIT:
-            logger.warning(f"Tweet too long ({len(tweet_text)} chars), truncating to {TWITTER_CHAR_LIMIT}")
-            tweet_text = tweet_text[:TWITTER_CHAR_LIMIT - 3] + "..."
-        
+        if len(tweet_text) > twitter_char_limit:
+            logger.warning(f"Tweet too long ({len(tweet_text)} chars), truncating to {twitter_char_limit}")
+            tweet_text = tweet_text[:twitter_char_limit - 3] + "..."
+
         logger.info(f"Final tweet text ({len(tweet_text)} chars):\n{tweet_text}")
 
-        # Upload image if present
-        media_id = None
-        if image_url:
-            logger.info(f"Found image in embed: {image_url}")
-            media_id = await self._upload_image_to_twitter(image_url)
-        
+        image_urls = _get_image_urls_for_message(message, embed_image_url)
+        if image_urls:
+            logger.info(f"Found {len(image_urls)} image(s) to upload")
+        media_ids = await self._upload_images_to_twitter(image_urls)
+
         # Post tweet with retry logic for transient connection errors
         max_retries = 3
         retry_delay = 5  # seconds
-        
+
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
@@ -1180,9 +1244,12 @@ class DiscordTwitterBot(commands.Bot):
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # backoff: 5s then 10s
                 
-                kwargs = {"text": tweet_text}
-                if media_id:
-                    kwargs["media_ids"] = [media_id]
+                kwargs = {}
+                # Twitter supports media-only posts, so omit empty text when an image uploaded.
+                if tweet_text or not media_ids:
+                    kwargs["text"] = tweet_text
+                if media_ids:
+                    kwargs["media_ids"] = media_ids
 
                 response = self.twitter_client.create_tweet(**kwargs)
                 logger.info(f"Tweet posted successfully. Response: {response}")
@@ -1193,7 +1260,7 @@ class DiscordTwitterBot(commands.Bot):
                     logger.info(f"Tweet URL: https://twitter.com/i/web/status/{tweet_id}")
                 
                 return tweet_text  # Success - exit retry loop
-                
+
             except (ConnectionResetError, ConnectionError, RequestsConnectionError) as e:
                 logger.warning(f"Connection error on attempt {attempt + 1}/{max_retries}: {e}")
                 if attempt < max_retries - 1:
